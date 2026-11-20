@@ -24,6 +24,7 @@
 | 服务注入列表 | 导出 `inject = ['slots', 'locale', 'uiConversation']` | 运行时由 Cordis 解析；官方最小示例 `dsh-client-ui-goal/lib/client.js:661-673` 用同一组服务（`locale` + `uiConversation` + `slots`） |
 | baseline 外部模块 | `react` 已在 shell 冻结模块表内，因此本 bundle **不需要** `dsh.client.external` | `dsh-web-frontend/dist/assets/index-*.js` 的 `staticModules` 表（含 `react`、`react/jsx-runtime`、`@deepseek-ai/dsh-client-ui-*` 等） |
 | 官方推荐做法 | “Add a Chat row by registering an event definition with `ctx.uiConversation.events.register()` and its view in the `conversation.chat.node` slot under the definition's `kind`” | `dsh-agent-preset/skills/cordis-plugin-development/references/practices.md:37` |
+| 插件面板标题 / 图标 | 包根 `locale/<lang>.json` 的 `meta.title/description` + `package.json#icon`（或 `./icon` 资源）由 DSH app-boot 直接读取，不走 Client bundle | `dsh-app-boot/lib/index.js:2986-3047` |
 
 `packages/tool-result-slimmer/package.json` 中与本半相关的字段（core-dev 已落盘，保持一致即可）：
 

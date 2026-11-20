@@ -172,9 +172,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      CI_ARTIFACTS_DIR: ${{ runner.temp }}/ci-artifacts
-      CI_ENV_FILE: ${{ runner.temp }}/ci-env.sh
-      DSH_HOME: ${{ runner.temp }}/dsh-home
+      # Literal /tmp paths: the `runner` context is not available in a job-level env block.
+      CI_ARTIFACTS_DIR: /tmp/ci-artifacts
+      CI_ENV_FILE: /tmp/ci-env.sh
+      DSH_HOME: /tmp/dsh-home
       DSH_TEST_PROFILE_HEADLESS: ci-headless
       DSH_TEST_PROFILE_WEB: ci-web
       DSH_TEST_MODEL: ${{ inputs.model || '' }}
@@ -345,6 +346,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: verify-evidence-${{ github.run_id }}
-          path: ${{ runner.temp }}/ci-artifacts
+          path: /tmp/ci-artifacts
           if-no-files-found: warn
           retention-days: 14

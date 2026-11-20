@@ -50,7 +50,7 @@ export const SLIM_TOOL_DESCRIPTION =
  */
 export const SLIM_PARAMETER_DESCRIPTIONS = Object.freeze({
   summary:
-    'One short sentence (Chinese preferred, <=80 chars) describing this slimming pass; shown in the plugin record and UI details.',
+    'One short sentence (Chinese preferred, <=80 chars) describing this slimming pass; shown in the UI details and run metadata.',
   items:
     'Only the candidates that need changing. Never include entries that should stay as-is; unlisted candidates are kept unchanged. Empty array means "nothing to change".',
   index:

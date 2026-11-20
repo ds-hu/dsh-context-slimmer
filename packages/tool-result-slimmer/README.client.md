@@ -170,7 +170,8 @@ is rebuilt.
   `data-ctxslimmer-trigger`, `data-ctxslimmer-status`, `data-status`,
   `data-expanded`.
 - Copy lives in the in-bundle `zh`/`en` dictionaries (`row.*`, `item.*`); the
-  `locale/*.json` files belong to the Host plugin-panel metadata instead.
+  `locale/*.json` files are read by the DSH Loader for the native plugin-panel
+  title/description (via `dsh-app-boot`), not by this bundle.
 
 ---
 

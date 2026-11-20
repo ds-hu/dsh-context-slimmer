@@ -167,7 +167,7 @@ discover_workspaces() {
         process.exit(2);
       }
       const isBundle = Boolean(pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch);
-      process.stdout.write([dir, pkg.name, isBundle ? "1" : "0"].join("\t") + "\n");
+      process.stdout.write([dir === "" ? "." : dir, pkg.name, isBundle ? "1" : "0"].join("\t") + "\n");
     }
   ' "$REPO_ROOT"
 }
@@ -427,7 +427,7 @@ BUNDLE_DIR=""; BUNDLE_NAME=""
 while IFS=$'\t' read -r rel name is_bundle; do
   [[ -n "$name" ]] || continue
   if [[ "$is_bundle" == "1" ]] && [[ -z "$BUNDLE_NAME" ]]; then
-    BUNDLE_DIR="$REPO_ROOT${rel:+/$rel}"; BUNDLE_NAME="$name"
+    if [[ "$rel" == "." ]]; then BUNDLE_DIR="$REPO_ROOT"; else BUNDLE_DIR="$REPO_ROOT/$rel"; fi; BUNDLE_NAME="$name"
   fi
 done <<< "$WORKSPACES_TSV"
 if [[ -z "$BUNDLE_NAME" ]]; then
@@ -585,7 +585,7 @@ declare -a PACKAGE_PAIRS=()
 declare -a BUNDLE_NAMES=()
 while IFS=$'\t' read -r rel name is_bundle; do
   [[ -n "$name" ]] || continue
-  abs="$REPO_ROOT${rel:+/$rel}"
+  if [[ "$rel" == "." ]]; then abs="$REPO_ROOT"; else abs="$REPO_ROOT/$rel"; fi
   scope_dir="$(dirname "$name")"
   if [[ "$scope_dir" != "." ]]; then mkdir -p "$PROFILE_DIR/node_modules/$scope_dir"; fi
   rm -rf "$PROFILE_DIR/node_modules/$name"
