@@ -340,18 +340,36 @@ function normalizePlanItem(raw, position, targets, policy) {
  * Deterministic verification of the drop evidence of one plan (Lead tightening,
  * issue #2: "provably safe" means checkable, not a self-declared string).
  *
+ * Evidence may point at a kept result that is NOT one of the CANDIDATES: the
+ * host passes every current surface tool result as `options.keptResults` so a
+ * duplicate copy protected by RECENT can still be the authoritative kept copy.
+ *
  * @param {readonly object[]} items Normalized items.
  * @param {readonly object[]} targets Candidate targets.
  * @param {string} policy Effective policy.
- * @param {{ minTargetChars?: number }} options Verification options.
+ * @param {{ minTargetChars?: number, keptResults?: readonly object[] }} options Verification options.
  * @throws {PlanValidationError} When one evidence relation does not hold.
  */
 function verifyDropEvidence(items, targets, policy, options) {
   const minTargetChars = options.minTargetChars ?? 0
   const droppedIndexes = new Set(items.filter((item) => item.op === 'drop').map((item) => item.index))
+  const targetIndexByCallId = new Map()
   const byCallId = new Map()
   for (const target of targets) {
-    if (typeof target.callId === 'string' && target.callId.length > 0) byCallId.set(target.callId, target)
+    if (typeof target.callId !== 'string' || target.callId.length === 0) continue
+    targetIndexByCallId.set(target.callId, target.index)
+    byCallId.set(target.callId, target)
+  }
+  // Kept-but-not-candidate results extend the evidence pool (never candidates).
+  for (const kept of options.keptResults ?? []) {
+    if (kept === null || typeof kept !== 'object') continue
+    if (typeof kept.callId !== 'string' || kept.callId.length === 0) continue
+    if (byCallId.has(kept.callId)) continue
+    byCallId.set(kept.callId, kept)
+  }
+  const isDroppedCallId = (callId) => {
+    const index = targetIndexByCallId.get(callId)
+    return index !== undefined && droppedIndexes.has(index)
   }
   const allowed = policy === 'conservative'
     ? CONSERVATIVE_EVIDENCE_KINDS
@@ -384,7 +402,7 @@ function verifyDropEvidence(items, targets, policy, options) {
       if (other === undefined) {
         throw new PlanValidationError('item-duplicate-ref', `${subject}.duplicateOf "${item.duplicateOf}" is not one of this payload's candidates`)
       }
-      if (droppedIndexes.has(other.index)) {
+      if (isDroppedCallId(item.duplicateOf)) {
         throw new PlanValidationError('item-duplicate-ref', `${subject}.duplicateOf "${item.duplicateOf}" is itself dropped by this plan; keep exactly one copy`)
       }
       if (other.toolName !== target.toolName) {
@@ -412,7 +430,7 @@ function verifyDropEvidence(items, targets, policy, options) {
       if (other === undefined) {
         throw new PlanValidationError('item-superseded-ref', `${subject}.supersededBy "${item.supersededBy}" is not one of this payload's candidates`)
       }
-      if (droppedIndexes.has(other.index)) {
+      if (isDroppedCallId(item.supersededBy)) {
         throw new PlanValidationError('item-superseded-ref', `${subject}.supersededBy "${item.supersededBy}" is itself dropped by this plan`)
       }
       if (other.toolName !== target.toolName) {

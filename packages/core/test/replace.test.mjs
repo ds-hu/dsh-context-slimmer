@@ -4,6 +4,9 @@ import test from 'node:test'
 import {
   applyPlan,
   applyToolResultReplacement,
+  buildDuplicateDropItems,
+  collectEvidenceResults,
+  findDuplicateHints,
   readSurfaceEntries,
   selectTargets,
 } from '../lib/replace.js'
@@ -166,4 +169,62 @@ test('replacements must be a byte-for-byte original event except content', () =>
     () => applyToolResultReplacement({ session, target, content: [{ type: 'text', text: 'a'.repeat(600) }], shadowedTokenCount: 1 }),
     /not smaller/,
   )
+})
+
+
+test('duplicate scan: same tool, byte-equal, size filter, keep later, recent copy allowed', () => {
+  const session = createFakeSession()
+  session.appendToolResult('call-a', 'read_file', 'large duplicate body')
+  session.appendToolResult('call-b', 'read_file', 'large duplicate body')
+  session.appendToolResult('call-c', 'bash', 'large duplicate body') // different tool: never paired
+  session.appendToolResult('call-d', 'read_file', 'short')
+  session.appendToolResult('call-e', 'read_file', 'short') // below minTargetChars: not a duplicate pair
+  const entries = readSurfaceEntries(session)
+  const targets = selectTargets(entries, { maxTargets: 12, protectRecent: 0, minTargetChars: 1 })
+  const evidence = collectEvidenceResults(entries)
+  assert.deepEqual(evidence.map((item) => item.callId), ['call-a', 'call-b', 'call-c', 'call-d', 'call-e'])
+
+  const hints = findDuplicateHints(entries, targets, { minTargetChars: 10 })
+  assert.deepEqual([...hints.entries()], [[0, 'call-b']])
+
+  const items = buildDuplicateDropItems(entries, targets, { minTargetChars: 10 })
+  assert.equal(items.length, 1)
+  assert.equal(items[0].index, 0)
+  assert.equal(items[0].evidence.kind, 'duplicate')
+  assert.equal(items[0].duplicateOf, 'call-b')
+  assert.equal(items[0].reason, '重复读取（宿主判定）')
+
+  // The kept copy may live in the RECENT-protected area: still a valid kept copy.
+  const pairSession = createFakeSession()
+  pairSession.appendToolResult('call-1', 'read_file', 'pair body')
+  pairSession.appendToolResult('call-2', 'bash', 'unrelated tail')
+  pairSession.appendToolResult('call-3', 'read_file', 'pair body')
+  const pairEntries = readSurfaceEntries(pairSession)
+  const pairTargets = selectTargets(pairEntries, { maxTargets: 12, protectRecent: 1, minTargetChars: 4 })
+  assert.deepEqual(pairTargets.map((target) => target.callId), ['call-1', 'call-2'])
+  const pairHints = findDuplicateHints(pairEntries, pairTargets, { minTargetChars: 4 })
+  assert.deepEqual([...pairHints.entries()], [[0, 'call-3']], 'kept copy protected by RECENT is still usable')
+  const pairItems = buildDuplicateDropItems(pairEntries, pairTargets, { minTargetChars: 4 })
+  assert.equal(pairItems.length, 1)
+  assert.equal(pairItems[0].duplicateOf, 'call-3')
+
+  // Both copies being candidates must not produce items dropping both sides.
+  const bothSession = createFakeSession()
+  bothSession.appendToolResult('call-x', 'read_file', 'twin body')
+  bothSession.appendToolResult('call-y', 'read_file', 'twin body')
+  const bothEntries = readSurfaceEntries(bothSession)
+  const bothTargets = selectTargets(bothEntries, { maxTargets: 12, protectRecent: 0, minTargetChars: 4 })
+  const bothItems = buildDuplicateDropItems(bothEntries, bothTargets, { minTargetChars: 4 })
+  assert.deepEqual(bothItems.map((item) => item.index), [0])
+  assert.equal(bothItems[0].duplicateOf, 'call-y')
+})
+
+test('duplicate scan excludes failed results and never drops both sides', () => {
+  const session = createFakeSession()
+  session.appendToolResult('call-1', 'read_file', 'same body', { isError: true })
+  session.appendToolResult('call-2', 'read_file', 'same body')
+  const entries = readSurfaceEntries(session)
+  const targets = selectTargets(entries, { maxTargets: 12, protectRecent: 0, minTargetChars: 1 })
+  assert.deepEqual([...findDuplicateHints(entries, targets, { minTargetChars: 1 }).entries()], [])
+  assert.deepEqual(buildDuplicateDropItems(entries, targets, { minTargetChars: 1 }), [])
 })

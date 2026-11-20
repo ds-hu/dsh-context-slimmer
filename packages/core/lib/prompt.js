@@ -33,7 +33,7 @@ export const SLIM_SYSTEM_PROMPT_ZH_CONSERVATIVE = `【角色】编码 Agent 的�
 - evidence.kind="duplicate"：另一条保留结果与本条内容逐字相同；必须写 "duplicateOf":"<callId>"。
 - evidence.kind="superseded"：本条是失败结果，且已被更晚的、同一工具的成功结果覆盖；必须写 "supersededBy":"<callId>"。
 - evidence.kind="empty"：空白、(no output)、[no output]、仅退出码 0 等无信息输出。
-唯一的长文本读取结果、失败证据、用户约束、安全信息：一个字都不要动；trim 一律拒绝。无法证明安全 → 返回 {"summary":"本次无改动","items":[]}，不要猜测。
+候选行自带 duplicateOf= 提示时直接抄；重复对删较早的、保留较晚的；另一条即使也在 CANDIDATES 里，只要不同时 drop 即视为保留副本。唯一的长文本读取结果、失败证据、用户约束、安全信息：一个字都不要动；trim 一律拒绝。无法证明安全 → 返回 {"summary":"本次无改动","items":[]}，不要猜测。
 【输出】只输出 JSON，不要 Markdown、不要代码块：
 正例 {"summary":"清理重复读取","items":[{"index":2,"op":"drop","evidence":{"kind":"duplicate"},"duplicateOf":"call_abc","reason":"重复读取"}]}
 正例 {"summary":"清理空输出","items":[{"index":0,"op":"drop","evidence":{"kind":"empty"},"reason":"无输出"}]}
@@ -47,7 +47,7 @@ export const SLIM_SYSTEM_PROMPT_EN_CONSERVATIVE = `[ROLE] Context slimmer of a c
 - evidence.kind="duplicate": another KEPT result is byte-equal to this one; also write "duplicateOf":"<callId>".
 - evidence.kind="superseded": this result FAILED and a later successful result of the same tool covers it; also write "supersededBy":"<callId>".
 - evidence.kind="empty": blank, (no output), [no output], exit-code-0-only noise.
-Never touch a unique long file read, failure evidence, user constraints or safety information; trim is rejected. If you cannot prove safety, return {"summary":"no changes","items":[]} - do not guess.
+When a candidate line carries a duplicateOf= hint, copy it: drop the EARLIER copy and keep the later one; the other copy may also be a CANDIDATE as long as the plan does not drop both. Never touch a unique long file read, failure evidence, user constraints or safety information; trim is rejected. If you cannot prove safety, return {"summary":"no changes","items":[]} - do not guess.
 [OUTPUT] JSON only, no Markdown:
 ok {"summary":"drop duplicate read","items":[{"index":2,"op":"drop","evidence":{"kind":"duplicate"},"duplicateOf":"call_abc","reason":"duplicate"}]}
 ok {"summary":"drop empty output","items":[{"index":0,"op":"drop","evidence":{"kind":"empty"},"reason":"no output"}]}
@@ -160,7 +160,10 @@ export function renderCandidates(candidates) {
       const error = candidate.isError === true ? 'true' : 'false'
       const text = typeof candidate.text === 'string' ? candidate.text : ''
       const callId = typeof candidate.callId === 'string' && candidate.callId.length > 0 ? ` callId=${candidate.callId}` : ''
-      return `[#${candidate.index}] tool=${tool} error=${error} chars=${candidate.chars}${callId}\n${text}\n`
+      const duplicateOf = typeof candidate.duplicateOf === 'string' && candidate.duplicateOf.length > 0
+        ? ` duplicateOf=${candidate.duplicateOf}（逐字相同，可直接 drop 本条）`
+        : ''
+      return `[#${candidate.index}] tool=${tool} error=${error} chars=${candidate.chars}${callId}${duplicateOf}\n${text}\n`
     })
     .join('\n')
 }

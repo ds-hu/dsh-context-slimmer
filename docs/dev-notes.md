@@ -199,3 +199,13 @@
 
 - 自定义 `plugins.row.config` page 覆盖原生自动表单后，**只有 page 渲染的 14 个字段**可从面板编辑；`promptLocale`/`diagnosticsFile` 值保留但不在页面里（需要时改 profile `cordis.patch.yml`）。这是有意的：用户需求只要求“触发阈值 + 精简模型”可改，高级字段避免面板过载。
 - row 的 locale description 会让原生 summary seat 不渲染（`description ?? renderSlot(...)`），因此配置页验收以 **page 视图**为准；summary 代码保留但非验收点。
+
+## DEV-17 保守策略下宿主对“可证明重复”的确定性兜底（Lead §9.5）
+
+CI verify 彩排暴露：两条 24638-char `read_file` 结果**逐字相同**、且都在 CANDIDATES 里时，planner 在 conservative 下仍可能返回空计划（`{"summary":"本次无改动","items":[]}`，completionTokens=11）。这属于模型可靠性问题：字节级相等本应是程序判断，而不是让模型对超长文本做逐字比较并“自证安全”。benchmark 场景同一模型却正确 drop，说明不是 CI 脚本问题。
+
+实现（不绕过模型、不降低安全标准）：
+- **hints**：`replace.js` 新增 `findDuplicateHints(entries, targets, {minTargetChars})` 与 `buildDuplicateDropItems(...)`：同 tool、`normalizeComparableText` 去首尾空白/统一换行后逐字相等、两端 chars ≥ minTargetChars、双方非 error；较早副本的 `duplicateOf` 指向更晚的保留副本（保留副本可以位于 RECENT 保护区，不必是 CANDIDATE）。候选行尾渲染 `duplicateOf=<callId>（逐字相同，可直接 drop 本条）`；prompt 保守段要求“提示直接抄；重复对删较早、保留较晚；另一条即使也在 CANDIDATES，只要不同时 drop 即视为保留副本”。
+- **保守兜底**：planner 返回空 items 且 `policy==='conservative'` 时，宿主用同一确定性重复组生成 drop 计划（`evidence.kind='duplicate'` + `duplicateOf` 指向保留副本 + `reason='重复读取（宿主判定）'`），**再走同一个 `validatePlan` 保守校验**，通过才 apply；诊断 `validate`/`apply` 带 `source:'host-fallback'`，保留 planner 的 finishReason/usage/durationMs/retried。无可证明重复组 → 维持 no-op。只 drop 较早副本、绝不动 RECENT/protectRecent、不同时 drop 一对的两条；balanced/aggressive 不启用兜底。
+- **证据池扩展**：`validatePlan(..., {keptResults})` 允许 duplicate/superseded 的引用指向当前 surface 上未入选 CANDIDATES 的保留结果（例如 RECENT 中的副本），但仍禁止引用本批被 drop 的条目。
+- 测试：core 新增重复扫描/大小过滤/不同 tool/失败结果排除/保留较晚/RECENT 保留副本/不同时 drop 两条、hint 渲染与 prompt 锚点、长度上限；host 新增 hint 被模型照抄的正常路径、空计划+重复→兜底 applied（诊断 source/usage/finishReason）、空计划+无重复→no-op、balanced 空计划不兜底。

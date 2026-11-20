@@ -34,6 +34,9 @@ test('v1.4 prompts are minimal: one JSON object, no tools, no long tables', () =
   // Minimal-output requirement: no explanation/thinking.
   assert.equal(SYSTEM_PROMPTS.en.conservative.includes('no explanation'), true)
   assert.equal(SYSTEM_PROMPTS.en.conservative.includes('reason<=20'), true)
+  // Host duplicate hints: copy-pasteable duplicateOf + conservative instruction.
+  assert.equal(SYSTEM_PROMPTS.zh.conservative.includes('duplicateOf= 提示时直接抄'), true)
+  assert.equal(SYSTEM_PROMPTS.en.conservative.includes('duplicateOf= hint'), true)
   // Balanced/aggressive document their trim caps.
   assert.equal(SYSTEM_PROMPTS.zh.balanced.includes('4000'), true)
   assert.equal(SYSTEM_PROMPTS.zh.aggressive.includes('1200'), true)
@@ -50,8 +53,10 @@ test('selectSystemPrompt picks locale and policy, falling back to conservative',
 test('candidates expose index/tool/isError/chars/callId (evidence refs) and never the seq', () => {
   const rendered = renderCandidates([
     { index: 0, tool: 'bash', isError: false, chars: 100, callId: 'call_abc', text: 'hello' },
+    { index: 1, tool: 'read_file', isError: false, chars: 200, callId: 'call_def', duplicateOf: 'call_ghi', text: 'world' },
   ])
   assert.equal(rendered.includes('[#0] tool=bash error=false chars=100 callId=call_abc'), true)
+  assert.equal(rendered.includes('duplicateOf=call_ghi（逐字相同，可直接 drop 本条）'), true)
   assert.equal(rendered.includes('seq='), false)
 })
 

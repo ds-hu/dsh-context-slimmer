@@ -41,7 +41,7 @@ import path from 'node:path'
 import { Config, ConfigError, promptLocaleOf, recordModel, resolveConfig, resolveModelTarget } from '@ds-hu/dsh-context-slimmer-core/config'
 import { CounterStore, createCounter, noteToolResult, resetCounter, shouldTrigger, triggerSnapshot } from '@ds-hu/dsh-context-slimmer-core/counters'
 import { STRUCTURED_OUTPUT_TOOL, buildPlannerInstruction } from '@ds-hu/dsh-context-slimmer-core/prompt'
-import { applyPlan, readSurfaceEntries, selectTargets } from '@ds-hu/dsh-context-slimmer-core/replace'
+import { applyPlan, buildDuplicateDropItems, collectEvidenceResults, findDuplicateHints, readSurfaceEntries, selectTargets } from '@ds-hu/dsh-context-slimmer-core/replace'
 import { validatePlan } from '@ds-hu/dsh-context-slimmer-core/plan'
 import { STATUS_APPLIED, STATUS_FAILED, STATUS_NO_OP, STATUS_REJECTED } from '@ds-hu/dsh-context-slimmer-core/events'
 
@@ -474,6 +474,10 @@ export class SlimmerHost {
    */
   async runBatch({ agent, session, entries, targets, batch, task, parentSignal, modelTarget }) {
     const targetSeqs = new Set(targets.map((target) => target.seq))
+    // Deterministic duplicate hints: the host has already proven byte equality,
+    // so the prompt can hand the model a copy-pasteable duplicateOf reference.
+    const evidenceResults = collectEvidenceResults(entries)
+    const duplicateHints = findDuplicateHints(entries, targets, { minTargetChars: this.config.minTargetChars })
     const instruction = buildPlannerInstruction({
       locale: promptLocaleOf(this.config),
       policy: this.config.policy,
@@ -486,6 +490,7 @@ export class SlimmerHost {
         isError: target.isError,
         chars: target.chars,
         callId: target.callId,
+        ...(duplicateHints.has(target.index) ? { duplicateOf: duplicateHints.get(target.index) } : {}),
         text: target.text,
       })),
     })
@@ -658,6 +663,7 @@ export class SlimmerHost {
       maxItems: this.config.maxTargets,
       policy: this.config.policy,
       minTargetChars: this.config.minTargetChars,
+      keptResults: evidenceResults,
     })
     this.diag(
       'validate',
@@ -673,44 +679,79 @@ export class SlimmerHost {
       this.ctx.logger?.warn?.(`context-slimmer: plan rejected by ${this.config.policy} policy (${validation.code}); nothing replaced`)
       return STATUS_REJECTED
     }
-    if (validation.plan.items.length === 0) {
-      this.diag('no-op', { reason: 'empty-items' }, session.id)
-      return STATUS_NO_OP
-    }
-    const tokenMeter = this.ctx.get?.('tokenMeter')
-    try {
-      const applied = applyPlan({
-        session,
-        targets,
-        plan: validation.plan,
-        estimateTokens: (message) => estimateMessageTokens(tokenMeter, message),
-        batch,
-      })
-      this.diag(
-        'apply',
-        {
-          items: applied.totals.items,
-          charsSaved: applied.totals.charsSaved,
-          degraded: applied.degraded === true,
-          metaLanded: applied.metaLanded === true,
-          ...plannerInfo,
-        },
-        session.id,
-      )
-      this.ctx.logger?.info?.(
-        `context-slimmer: applied ${String(applied.totals.items)} items, saved ${String(applied.totals.charsSaved)} chars` +
-          (applied.metaLanded ? '' : ' (UI metadata degraded: prune extension rejected)'),
-      )
-      if (applied.degraded) {
-        this.extensionSupported = false
-        this.ctx.logger?.warn?.('context-slimmer: prune metadata extension rejected by the session runtime; continuing without UI rows')
+    const applyValidated = (validatedPlan, source) => {
+      const tokenMeter = this.ctx.get?.('tokenMeter')
+      try {
+        const applied = applyPlan({
+          session,
+          targets,
+          plan: validatedPlan,
+          estimateTokens: (message) => estimateMessageTokens(tokenMeter, message),
+          batch,
+        })
+        this.diag(
+          'apply',
+          {
+            items: applied.totals.items,
+            charsSaved: applied.totals.charsSaved,
+            degraded: applied.degraded === true,
+            metaLanded: applied.metaLanded === true,
+            source,
+            ...plannerInfo,
+          },
+          session.id,
+        )
+        this.ctx.logger?.info?.(
+          `context-slimmer: applied ${String(applied.totals.items)} items (${source}), saved ${String(applied.totals.charsSaved)} chars` +
+            (applied.metaLanded ? '' : ' (UI metadata degraded: prune extension rejected)'),
+        )
+        if (applied.degraded) {
+          this.extensionSupported = false
+          this.ctx.logger?.warn?.('context-slimmer: prune metadata extension rejected by the session runtime; continuing without UI rows')
+        }
+        return STATUS_APPLIED
+      } catch (error) {
+        this.diag('apply', { error: bounded(errorMessage(error), 500), source, ...plannerInfo }, session.id)
+        this.ctx.logger?.warn?.(`context-slimmer: replacement failed: ${errorMessage(error)}`)
+        return STATUS_FAILED
       }
-      return STATUS_APPLIED
-    } catch (error) {
-      this.diag('apply', { error: bounded(errorMessage(error), 500), ...plannerInfo }, session.id)
-      this.ctx.logger?.warn?.(`context-slimmer: replacement failed: ${errorMessage(error)}`)
-      return STATUS_FAILED
     }
+    if (validation.plan.items.length > 0) return applyValidated(validation.plan, 'planner')
+    // Conservative host fallback (Lead ruling §9.5): byte equality is a program
+    // check, not a model judgement. When the planner returns an empty plan, drop
+    // the earlier copies of deterministic duplicate groups after re-validating
+    // the generated plan with the SAME conservative validator.
+    if (this.config.policy === 'conservative') {
+      const fallbackItems = buildDuplicateDropItems(entries, targets, { minTargetChars: this.config.minTargetChars })
+      if (fallbackItems.length > 0) {
+        const fallbackPlan = { summary: '宿主去重：逐字相同的重复读取', items: fallbackItems }
+        const fallbackValidation = validatePlan(fallbackPlan, targets, {
+          maxItems: this.config.maxTargets,
+          policy: this.config.policy,
+          minTargetChars: this.config.minTargetChars,
+          keptResults: evidenceResults,
+        })
+        this.diag(
+          'validate',
+          {
+            ok: fallbackValidation.ok,
+            policy: this.config.policy,
+            source: 'host-fallback',
+            ...plannerInfo,
+            ...(fallbackValidation.ok ? {} : { code: fallbackValidation.code, message: bounded(fallbackValidation.message, 500) }),
+          },
+          session.id,
+        )
+        if (fallbackValidation.ok && fallbackValidation.plan.items.length > 0) {
+          this.ctx.logger?.info?.(
+            `context-slimmer: planner returned an empty plan; deterministic fallback drops ${String(fallbackValidation.plan.items.length)} provable duplicate(s)`,
+          )
+          return applyValidated(fallbackValidation.plan, 'host-fallback')
+        }
+      }
+    }
+    this.diag('no-op', { reason: 'empty-items' }, session.id)
+    return STATUS_NO_OP
   }
 
   /**

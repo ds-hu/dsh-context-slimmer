@@ -27,6 +27,7 @@
  */
 
 import { META_KEY, buildItemMeta, buildSummaryMeta, contentTextChars, hasSlimMeta, textChars } from './events.js'
+import { normalizeComparableText } from './plan.js'
 import { buildDropText } from './templates.js'
 
 /** Default number of most-recent tool results that are never touched. */
@@ -159,6 +160,130 @@ export function selectTargets(entries, options = {}) {
     message: entry.message,
     turn: entry.turn,
   }))
+}
+
+/**
+ * Tool name per callId from the assistant messages of one surface.
+ *
+ * @param {readonly object[]} entries Entries from {@link readSurfaceEntries}.
+ * @returns {Map<string, string>} callId -> tool name.
+ */
+function callNamesOf(entries) {
+  const callNames = new Map()
+  for (const entry of entries) {
+    if (entry.type !== 'assistant/message') continue
+    for (const call of entry.calls) callNames.set(call.callId, call.name)
+  }
+  return callNames
+}
+
+/**
+ * Current-surface tool results shaped as evidence references, including results
+ * that are not CANDIDATES (e.g. the RECENT-protected copy of a duplicate pair).
+ *
+ * @param {readonly object[]} entries Entries from {@link readSurfaceEntries}.
+ * @returns {object[]} `{ callId, seq, toolName, isError, chars, text }` records.
+ */
+export function collectEvidenceResults(entries) {
+  const callNames = callNamesOf(entries)
+  const results = []
+  for (const entry of entries) {
+    if (entry.type !== 'tool/result') continue
+    const toolName = callNames.get(entry.callId)
+    if (typeof entry.callId !== 'string' || entry.callId.length === 0 || toolName === undefined) continue
+    results.push({ callId: entry.callId, seq: entry.seq, toolName, isError: entry.isError === true, chars: entry.chars, text: entry.text })
+  }
+  return results
+}
+
+/**
+ * Deterministic duplicate groups over one surface: same tool, byte-equal after
+ * trim/newline normalization, both sides >= `minTargetChars`, both successful.
+ *
+ * @param {readonly object[]} entries Entries from {@link readSurfaceEntries}.
+ * @param {{ minTargetChars?: number }} [options] Scan options.
+ * @returns {Map<string, object[]>} key -> results ascending by seq.
+ */
+function duplicateGroups(entries, options = {}) {
+  const minTargetChars = options.minTargetChars ?? 0
+  const groups = new Map()
+  for (const result of collectEvidenceResults(entries)) {
+    if (result.isError || result.chars < minTargetChars) continue
+    const key = `${result.toolName}\u0000${normalizeComparableText(result.text)}`
+    const group = groups.get(key)
+    if (group === undefined) groups.set(key, [result])
+    else group.push(result)
+  }
+  for (const [key, group] of groups) {
+    if (group.length < 2) groups.delete(key)
+    else group.sort((left, right) => left.seq - right.seq)
+  }
+  return groups
+}
+
+/**
+ * Host-side duplicate hints for the CANDIDATES payload (Lead ruling §9.5):
+ * "provably safe" byte-equality is a program check, so each candidate whose
+ * later byte-equal copy exists gets a `duplicateOf` hint the model can copy.
+ *
+ * @param {readonly object[]} entries Entries from {@link readSurfaceEntries}.
+ * @param {readonly object[]} targets Selected targets (dense 0-based index).
+ * @param {{ minTargetChars?: number }} [options] Scan options.
+ * @returns {Map<number, string>} target index -> callId of the later kept copy.
+ */
+export function findDuplicateHints(entries, targets, options = {}) {
+  const minTargetChars = options.minTargetChars ?? 0
+  const groups = duplicateGroups(entries, options)
+  const hints = new Map()
+  for (const target of targets) {
+    if (target.isError || target.chars < minTargetChars) continue
+    const group = groups.get(`${target.toolName}\u0000${normalizeComparableText(target.text)}`)
+    if (group === undefined) continue
+    for (let position = group.length - 1; position >= 0; position -= 1) {
+      const kept = group[position]
+      if (kept.seq > target.seq && kept.callId !== target.callId) {
+        hints.set(target.index, kept.callId)
+        break
+      }
+    }
+  }
+  return hints
+}
+
+/**
+ * Conservative host fallback: when the planner returns an EMPTY plan, drop the
+ * earlier copies of deterministic duplicate groups. Never drops the kept copy
+ * (the latest byte-equal result, even when it lives in RECENT) and never drops
+ * both sides of one pair.
+ *
+ * @param {readonly object[]} entries Entries from {@link readSurfaceEntries}.
+ * @param {readonly object[]} targets Selected targets (dense 0-based index).
+ * @param {{ minTargetChars?: number }} [options] Scan options.
+ * @returns {object[]} Plan items with duplicate evidence, ascending by target index.
+ */
+export function buildDuplicateDropItems(entries, targets, options = {}) {
+  const groups = duplicateGroups(entries, options)
+  const targetByCallId = new Map()
+  for (const target of targets) {
+    if (typeof target.callId === 'string' && target.callId.length > 0) targetByCallId.set(target.callId, target)
+  }
+  const items = []
+  for (const group of groups.values()) {
+    const kept = group[group.length - 1]
+    for (const earlier of group.slice(0, -1)) {
+      const target = targetByCallId.get(earlier.callId)
+      if (target === undefined) continue
+      items.push({
+        index: target.index,
+        op: 'drop',
+        evidence: { kind: 'duplicate' },
+        duplicateOf: kept.callId,
+        reason: '重复读取（宿主判定）',
+      })
+    }
+  }
+  items.sort((left, right) => left.index - right.index)
+  return items
 }
 
 /**

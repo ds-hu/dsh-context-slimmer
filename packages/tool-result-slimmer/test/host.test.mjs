@@ -399,3 +399,85 @@ test('helper functions keep their documented contracts', () => {
   assert.equal(estimateMessageTokens(undefined, { content: [{ type: 'text', text: 'abcd' }] }), 1)
   assert.equal(typeof buildPlannerInstruction({ locale: 'zh', policy: 'conservative' }), 'string')
 })
+
+test('duplicate hints reach the prompt and a hint-copy plan applies once (source planner)', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  const host = new SlimmerHost(ctx, hostConfig({ minTargetChars: 8 }))
+  host.install()
+  await ctx.preStep(preStepPayload(session))
+  duplicateSetup(ctx, session)
+  ctx.llm.streamFactory = textPlanStream({
+    summary: '去重',
+    items: [{ index: 0, op: 'drop', evidence: { kind: 'duplicate' }, duplicateOf: 'call-1', reason: '重复' }],
+  })
+  await ctx.preStep(preStepPayload(session))
+
+  const instruction = ctx.llm.calls[0].messages.at(-1).content[0].text
+  assert.equal(instruction.includes('duplicateOf=call-1（逐字相同，可直接 drop 本条）'), true)
+  const appended = session.events.slice(-2)
+  assert.deepEqual(appended.map((event) => event.type), ['compaction/prune', 'tool/result'])
+  const stub = appended[1].data.message.content[0].text
+  assert.equal(stub.includes('duplicate of call-1 (kept above)'), true)
+  // Exactly one side of the pair was replaced (2 originals + 1 replacement).
+  assert.equal(session.events.filter((event) => event.type === 'tool/result').length, 3)
+  assert.equal(session.events.filter((event) => event.type === 'compaction/prune').length, 1)
+})
+
+test('empty conservative plan + provable duplicates → deterministic host fallback applies', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slimmer-fallback-'))
+  const diagnosticsFile = path.join(dir, 'diagnostics.jsonl')
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  const host = new SlimmerHost(ctx, hostConfig({ minTargetChars: 8, diagnosticsFile }))
+  host.install()
+  await ctx.preStep(preStepPayload(session))
+  duplicateSetup(ctx, session)
+  ctx.llm.streamFactory = textPlanStream({ summary: '本次无改动', items: [] })
+  await ctx.preStep(preStepPayload(session))
+
+  const appended = session.events.slice(-2)
+  assert.deepEqual(appended.map((event) => event.type), ['compaction/prune', 'tool/result'])
+  const stub = appended[1].data.message.content[0].text
+  assert.equal(stub.includes('duplicate of call-1 (kept above)'), true)
+  const replacement = appended[1].data.message.content[0].text
+  assert.equal(replacement.includes('重复读取（宿主判定）'), false, 'host reason stays in plan metadata, not the stub')
+
+  const records = fs.readFileSync(diagnosticsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  const fallbackValidate = records.filter((record) => record.kind === 'validate' && record.source === 'host-fallback')
+  const fallbackApply = records.filter((record) => record.kind === 'apply' && record.source === 'host-fallback')
+  assert.equal(fallbackValidate.length, 1)
+  assert.equal(fallbackValidate[0].ok, true)
+  assert.equal(fallbackApply.length, 1)
+  assert.equal(fallbackApply[0].items, 1)
+  assert.equal(fallbackApply[0].finishReason, 'stop')
+  assert.deepEqual(fallbackApply[0].usage, { promptTokens: 100, completionTokens: 20 })
+  assert.equal(host.counters.get(session.id).observedCalls, 0)
+  fs.rmSync(dir, { recursive: true, force: true })
+})
+
+test('empty conservative plan without provable duplicates stays a no-op (no fallback)', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  const host = new SlimmerHost(ctx, hostConfig())
+  host.install()
+  await ctx.preStep(preStepPayload(session))
+  liveResult(ctx, session, 'call-0', 'bash', 'unique long output')
+  liveResult(ctx, session, 'call-1', 'read_file', 'another unique output')
+  ctx.llm.streamFactory = textPlanStream({ summary: '本次无改动', items: [] })
+  await ctx.preStep(preStepPayload(session))
+  assert.equal(session.events.filter((event) => event.type === 'compaction/prune').length, 0)
+  assert.equal(session.events.filter((event) => event.type === 'tool/result').length, 2)
+})
+
+test('host fallback is conservative-only: balanced empty plan does not force a drop', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  const host = new SlimmerHost(ctx, hostConfig({ policy: 'balanced', minTargetChars: 8 }))
+  host.install()
+  await ctx.preStep(preStepPayload(session))
+  duplicateSetup(ctx, session)
+  ctx.llm.streamFactory = textPlanStream({ summary: 'no changes', items: [] })
+  await ctx.preStep(preStepPayload(session))
+  assert.equal(session.events.filter((event) => event.type === 'compaction/prune').length, 0)
+})
