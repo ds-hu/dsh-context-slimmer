@@ -99,9 +99,25 @@ function discoverUrl(args) {
 }
 
 async function loadPlaywright() {
+  // Local resolution first (normal dev setup).
   for (const name of ['playwright', 'playwright-core', '@playwright/test']) {
     try { return await import(name); } catch { /* try next */ }
   }
+  // CI installs Playwright globally; ESM `import()` ignores NODE_PATH, so require
+  // it from the global npm root explicitly (the packages are CJS-compatible).
+  try {
+    const { createRequire } = await import('node:module');
+    const { spawnSync } = await import('node:child_process');
+    const { join, dirname } = await import('node:path');
+    const npmRoot = spawnSync('npm', ['root', '-g'], { encoding: 'utf8' });
+    if (npmRoot.status === 0 && npmRoot.stdout.trim()) {
+      const root = npmRoot.stdout.trim();
+      const requireFromGlobal = createRequire(join(root, '.dsh-screenshot-resolver.cjs'));
+      for (const name of ['playwright', 'playwright-core', '@playwright/test']) {
+        try { return requireFromGlobal(name); } catch { /* try next */ }
+      }
+    }
+  } catch { /* fall through to undefined */ }
   return undefined;
 }
 

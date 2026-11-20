@@ -2,6 +2,7 @@
 
 - **文档**：`docs/research/prompt-adaptation.md`
 - **版本**：v1（2026-11-20）
+- **v1.2（2026-11-20）**：planner 提交工具改为 native `structured_output`（managed fork + `outputSchema`，DEV-9）；提示词全文以 `docs/research/prompt-final.md` v1.2 为准（本文 §4/§5 保留为 v1.1 历史快照）。
 - **状态**：`packages/core/lib/prompt.js` 的**权威依据**。core-dev 请逐字复制本文 §4/§5/§6 的字符串，不要重排、不要"优化"措辞；如需改动先在此文档记录差异。
 - **上游**：`docs/research/context-irrelevance-2026.md`（证据，下称"报告"）、`docs/research/slimming-policy.md`（通用规则集）、`docs/architecture.md` §3.2–3.4（插件契约）。
 - **适配目标**：把报告 §10 的"自由 JSON 决策 schema"收敛成插件 `slim_tool_results` 的严格工具参数 `{summary, items:[{index, op:'drop'|'trim', text?, reason?}]}`。

@@ -43,7 +43,12 @@ DSH_TEST_MAX_OUTPUT_TOKENS="${DSH_TEST_MAX_OUTPUT_TOKENS:-2048}"
 DSH_TEST_REASONING_EFFORT="${DSH_TEST_REASONING_EFFORT:-off}"
 SESSION_COMPRESSION="${SESSION_COMPRESSION:-none}"
 ALLOW_UNLISTED_MODEL="${ALLOW_UNLISTED_MODEL:-0}"
-SLIMMER_CONFIG_JSON="${SLIMMER_CONFIG_JSON:-{\"enabled\":true,\"everyNToolCalls\":2,\"minChars\":0,\"protectRecent\":1,\"maxTargets\":6,\"minTargetChars\":0,\"timeoutMs\":180000,\"forkProvider\":\"fork\",\"promptLocale\":\"zh\",\"model\":{\"provider\":\"inherit\"}}}"
+# NOTE: no `${VAR:-{...}}` here — bash appends the trailing braces of a
+# brace-containing default even when the variable is set, corrupting the JSON.
+SLIMMER_CONFIG_JSON="${SLIMMER_CONFIG_JSON-}"
+if [[ -z "$SLIMMER_CONFIG_JSON" ]]; then
+  SLIMMER_CONFIG_JSON='{"enabled":true,"everyNToolCalls":2,"minChars":0,"protectRecent":1,"maxTargets":6,"minTargetChars":0,"timeoutMs":180000,"forkProvider":"fork","promptLocale":"zh","model":{"provider":"inherit"}}'
+fi
 SLIMMER_ENTRY_IDS="${SLIMMER_ENTRY_IDS:-}"
 SLIMMER_ENTRY_ID_REGEX="${SLIMMER_ENTRY_ID_REGEX:-}"
 SLIMMER_PATCH_FILE="${SLIMMER_PATCH_FILE:-}"
@@ -440,14 +445,46 @@ if [[ -z "$BUNDLE_NAME" ]]; then
   die "no workspace package declares dsh.bundle.patch; the profile has no bundle to install"
 fi
 
-# Validate the plugin config JSON early (dry-run included).
-printf '%s' "$SLIMMER_CONFIG_JSON" | node -e '
+# Validate (and normalize) the plugin config JSON early. `SLIMMER_CONFIG_JSON`
+# normally comes from scripts/ci/slimmer-config.default.json or a dispatch input;
+# environment plumbing occasionally appends stray trailing bytes, so trim back to
+# the last complete JSON object and report exactly what was adjusted.
+NORMALIZED_CONFIG="$(printf '%s' "$SLIMMER_CONFIG_JSON" | node -e '
   let raw = "";
   process.stdin.on("data", (d) => raw += d).on("end", () => {
-    try { const parsed = JSON.parse(raw); if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("must be a JSON object"); }
-    catch (error) { console.error(`SLIMMER_CONFIG_JSON invalid: ${error.message}`); process.exit(1); }
+    const describe = (value) => JSON.stringify(value.slice(-24));
+    const validate = (value) => {
+      const parsed = JSON.parse(value);
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("must be a JSON object");
+      return parsed;
+    };
+    try {
+      validate(raw);
+      process.stdout.write(raw);
+      return;
+    } catch (firstError) {
+      // Walk backwards over closing braces and accept the longest valid prefix.
+      let end = raw.lastIndexOf("}");
+      while (end > 0) {
+        const candidate = raw.slice(0, end + 1);
+        if (candidate.length !== raw.length) {
+          try {
+            validate(candidate);
+            console.error(`prepare-profile: WARNING: SLIMMER_CONFIG_JSON had ${raw.length - candidate.length} stray byte(s) after the final "}" (${describe(raw)}); using the trimmed JSON.`);
+            process.stdout.write(candidate);
+            return;
+          } catch {
+            /* try an earlier closing brace */
+          }
+        }
+        end = raw.lastIndexOf("}", end - 1);
+      }
+      console.error(`SLIMMER_CONFIG_JSON invalid: ${firstError.message}; length=${raw.length}, tail=${describe(raw)}`);
+      process.exit(1);
+    }
   });
-' || die "SLIMMER_CONFIG_JSON is invalid"
+')" || die "SLIMMER_CONFIG_JSON is invalid"
+SLIMMER_CONFIG_JSON="$NORMALIZED_CONFIG"
 
 if [[ -n "$SLIMMER_PATCH_FILE" && ! -f "$SLIMMER_PATCH_FILE" ]]; then
   die "SLIMMER_PATCH_FILE does not exist: $SLIMMER_PATCH_FILE"

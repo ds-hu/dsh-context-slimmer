@@ -1,20 +1,23 @@
 # 最终提示词（可直接复制 · 权威快照）
 
 - **文档**：`docs/research/prompt-final.md`
-- **版本**：v1（2026-11-20）
+- **版本**：v1.2（2026-11-20）
 - **用途**：`packages/core/lib/prompt.js` 的唯一复制来源；QA 快照测试基准。
 - **配套**：`docs/research/prompt-adaptation.md`（适配说明/差异/模板）、`docs/research/prompt-regression.md`（20 条回归用例）。
 - **约束**：本文件只含 4 段可复制内容（中文 system prompt / 英文 system prompt / 工具 description / 参数 description）+ 快照校验清单；不要在此正文里改措辞，改动请先改 `prompt-adaptation.md` 并升版本。
+- **v1.2 变更（R5 / DEV-9）**：planner 提交工具改为 manager 原生注入的 `structured_output`（managed fork + `outputSchema` 结构化输出），插件不再注册自定义工具；ZH/EN 各改 2 处（长度不变：ZH 1199 chars、EN 2819 chars）；工具 description 与 `summary` 参数 description 同步为“host-provided structured output tool / UI details and run metadata”。
 
 ---
 
-## 1. 工具 description（英文，112 words）
+## 1. 工具 description 与工具名
 
 ```text
-Remove redundant tokens from older tool results in a coding-agent conversation without changing facts, decisions, constraints, or safety information. The host passes only slimmable older results, each with an index; recent results, user intent, constraints, and safety records are protected. Call this tool exactly once with a plan listing only the entries to change: unlisted entries are kept as-is. Use op "drop" only for wholly irrelevant or duplicate results whose content is recoverable; use op "trim" with a self-describing, re-fetchable replacement text that preserves exact evidence (paths, commands, errors, line numbers, URLs). Never invent content. If unsure, omit the entry; the whole plan is validated atomically and any invalid item is rejected.
+Remove redundant tokens from older tool results in a coding-agent conversation without changing facts, decisions, constraints, or safety information. The host passes only slimmable older results, each with an index; recent results, user intent, constraints, and safety records are protected. Submit exactly one plan through the host-provided structured output tool listing only the entries to change: unlisted entries are kept as-is. Use op "drop" only for wholly irrelevant or duplicate results whose content is recoverable; use op "trim" with a self-describing, re-fetchable replacement text that preserves exact evidence (paths, commands, errors, line numbers, URLs). Never invent content. If unsure, omit the entry; the whole plan is validated atomically and any invalid item is rejected.
 ```
 
-**Tool name**：`slim_tool_results`
+**Tool name**：`structured_output`
+
+> 该工具由 manager 在 fork 子 Agent 创建窗口内**原生注入**（fork provider `outputSchema: true`），插件不注册自定义工具；子 Agent 调用一次即提交计划，计划从 `activation.result` 的结构化输出读取。`slim_tool_results` 仅作为研究文档的历史分类语言保留（`SLIM_TOOL_NAME` 已废弃、不再被调用）。
 
 ---
 
@@ -22,7 +25,7 @@ Remove redundant tokens from older tool results in a coding-agent conversation w
 
 | 参数 | description |
 | :-- | :-- |
-| `summary` | `One short sentence (Chinese preferred, <=80 chars) describing this slimming pass; shown in the plugin record and UI details.` |
+| `summary` | `One short sentence (Chinese preferred, <=80 chars) describing this slimming pass; shown in the UI details and run metadata.` |
 | `items` | `Only the candidates that need changing. Never include entries that should stay as-is; unlisted candidates are kept unchanged. Empty array means "nothing to change".` |
 | `items[].index` | `0-based index of the target as shown in the CANDIDATES payload marker "[#N]". This is the candidate position, not the session event sequence number. Never renumber or add 1; do not duplicate.` |
 | `items[].op` | `"drop" replaces the whole result with a short host-generated stub; "trim" replaces it with the complete text you provide.` |
@@ -34,7 +37,7 @@ Remove redundant tokens from older tool results in a coding-agent conversation w
 ## 3. 中文 system prompt（逐字；1199 字符 / 300 tokens 口径）
 
 ```text
-【角色】你是编码 Agent 的上下文精简器：从 CANDIDATES（旧工具结果）中选出需精简的条目，调用一次 slim_tool_results 提交计划；不解决任务、不对话、不调用工具。
+【角色】你是编码 Agent 的上下文精简器：从 CANDIDATES（旧工具结果）中选出需精简的条目，调用一次 structured_output 提交计划；不解决任务、不对话、不调用工具。
 
 【输入】TASK 任务；CONSTRAINTS 逐字约束；RECENT 最近结果；CANDIDATES 每条：[#N] tool=… error=… chars=… + 原文；# 后数字即 index（0 基，非 seq），勿重编号。
 
@@ -50,7 +53,7 @@ Remove redundant tokens from older tool results in a coding-agent conversation w
 9 无关（与任务/计划/最近决策无引用）→drop。
 10 模糊→不列出。
 
-【硬规则】只调用一次 slim_tool_results；无自然语言、无其他工具。summary≤80 字、items≤12、reason≤40 字。items 仅列需改条目；未列出=保留；不要写 KEEP 项。trim 的 text 以“[elided by context-slimmer]”开头，自描述可重取：工具/call、保留内容（路径/命令/URL+行号）、原文长度、重取方式；不得只留结论。不虚构事实；错误串/数值/路径/URL/行号逐字；不得把失败写成成功。不改配对/工具名/参数；每条候选最多一个 item；index 不得重复/越界。不确定→不列出，宁可少精简、不可错删。text≤300 tokens 且≤原文50%；整批压缩率≥50%。
+【硬规则】只调用一次 structured_output；无自然语言、无其他工具。summary≤80 字、items≤12、reason≤40 字。items 仅列需改条目；未列出=保留；不要写 KEEP 项。trim 的 text 以“[elided by context-slimmer]”开头，自描述可重取：工具/call、保留内容（路径/命令/URL+行号）、原文长度、重取方式；不得只留结论。不虚构事实；错误串/数值/路径/URL/行号逐字；不得把失败写成成功。不改配对/工具名/参数；每条候选最多一个 item；index 不得重复/越界。不确定→不列出，宁可少精简、不可错删。text≤300 tokens 且≤原文50%；整批压缩率≥50%。
 
 【输出契约】严格 JSON，单次工具调用：
 {"summary":"清理无关大输出","items":[{"index":3,"op":"drop","reason":"与任务无关"}]}
@@ -63,7 +66,7 @@ drop 无 text；trim 必带 text；非法项整单拒绝；无改动也调用一
 ## 4. 英文 system prompt（逐字；parity / fallback）
 
 ```text
-[ROLE] You are the context slimmer for a coding agent. From CANDIDATES (old tool results), choose the entries to slim and submit exactly one plan via a single slim_tool_results call. Do not solve the task, do not talk to the user, do not call other tools.
+[ROLE] You are the context slimmer for a coding agent. From CANDIDATES (old tool results), choose the entries to slim and submit exactly one plan via a single structured_output call. Do not solve the task, do not talk to the user, do not call other tools.
 
 [INPUT] TASK; CONSTRAINTS (verbatim); RECENT (never touched); each CANDIDATES entry is "[#N] tool=... error=... chars=..." followed by the original text. The number after # is the index (0-based, not the session seq); never renumber.
 
@@ -79,7 +82,7 @@ drop 无 text；trim 必带 text；非法项整单拒绝；无改动也调用一
 9 Irrelevant (no reference to task/plan/recent decisions) -> drop.
 10 Ambiguous -> omit.
 
-[HARD RULES] Exactly one slim_tool_results call; no prose, no other tools. summary<=80 chars, items<=12, reason<=40 chars. items contains only entries to change; anything unlisted is kept; never add KEEP items. trim text must start with "[elided by context-slimmer]" and be self-describing and recoverable: tool/call, what was kept (path/command/URL + line numbers), original size, how to re-fetch; never keep a conclusion without its source. Never invent facts; quote error strings/numbers/paths/URLs/line numbers exactly; never report a failure as success. Preserve tool/call pairing, tool names, arguments; at most one item per candidate; no duplicate or out-of-range index. If unsure, omit; prefer under-slimming over deleting needed state. text <= 300 tokens and <= 50% of the original; aim for >= 50% batch shrink.
+[HARD RULES] Exactly one structured_output call; no prose, no other tools. summary<=80 chars, items<=12, reason<=40 chars. items contains only entries to change; anything unlisted is kept; never add KEEP items. trim text must start with "[elided by context-slimmer]" and be self-describing and recoverable: tool/call, what was kept (path/command/URL + line numbers), original size, how to re-fetch; never keep a conclusion without its source. Never invent facts; quote error strings/numbers/paths/URLs/line numbers exactly; never report a failure as success. Preserve tool/call pairing, tool names, arguments; at most one item per candidate; no duplicate or out-of-range index. If unsure, omit; prefer under-slimming over deleting needed state. text <= 300 tokens and <= 50% of the original; aim for >= 50% batch shrink.
 
 [OUTPUT CONTRACT] Strict JSON in a single tool call:
 {"summary":"clean up irrelevant large output","items":[{"index":3,"op":"drop","reason":"irrelevant to task"}]}
@@ -90,25 +93,27 @@ drop has no text; trim requires text; any invalid item rejects the whole plan; i
 
 ---
 
-## 5. QA 快照校验清单（`packages/core/test/prompt.snapshot.test.js`）
+## 5. QA 快照校验清单（`packages/core/test/prompt.test.mjs`）
 
-core-dev 建议导出以下常量，供快照/暗号测试：
+core-dev 导出以下常量，供快照测试（当前实现已全部通过）：
 
 ```js
-export const SLIM_TOOL_NAME = 'slim_tool_results';
+export const STRUCTURED_OUTPUT_TOOL = 'structured_output';
+export const SLIM_TOOL_NAME = 'slim_tool_results';          // legacy，仅文档分类/兼容用途
 export const SLIM_TOOL_DESCRIPTION = `…§1…`;
 export const SLIM_PARAMETERS = { /* JSON Schema；description 用 §2 逐字 */ };
 export const SLIM_SYSTEM_PROMPT_ZH = `…§3…`;
 export const SLIM_SYSTEM_PROMPT_EN = `…§4…`;
+export const DATA_BOUNDARY = '…';                            // 任务 payload 首行，见 prompt.js
 ```
 
 快照测试必须断言（全部为硬断言）：
 
-1. **长度**：`SLIM_SYSTEM_PROMPT_ZH.length === 1199`（字符数）；`tokens` 口径 ≤300（用 `@deepseek-ai/dsh-token-meter/estimate` 的 `CHARS_PER_TOKEN=4`）；英文版 words ≤500。
-2. **锚点**（`ZH.includes(...)` 全为 true）：`【角色】`、`【输入】`、`【判定顺序（先匹配）】`、`【硬规则】`、`【输出契约】`、`slim_tool_results`、`只调用一次`、`index`、`0 基`、`未列出=保留`、`KEEP`、`[elided by context-slimmer]`、`失败`、`不得把失败写成成功`、`index 不得重复/越界`、`300 tokens`、`items 可为空`。
-3. **顺序**：`ZH.indexOf('安全/敏感') < ZH.indexOf('失败/报错') < ZH.indexOf('已被取代') < ZH.indexOf('可重算 bulk') < ZH.indexOf('部分相关') < ZH.indexOf('网页/搜索') < ZH.indexOf('写入/编辑') < ZH.indexOf('超大输出') < ZH.indexOf('无关') < ZH.indexOf('模糊')`（分类瀑布顺序）。
-4. **禁止词**：`ZH` 不含 `keep`（小写）、`class`、`confidence`、`TRIM`、`REPLACE`（避免把旧 schema 词带进新提示词）；不含 U+FFFD 替换字符。
-5. **一致性**：`SLIM_TOOL_DESCRIPTION` words ∈ [100,120]；四个参数 description 与 §2 逐字相等（`===`，不是包含）；`SLIM_TOOL_NAME === 'slim_tool_results'`。
-6. **渲染**：`renderPayload()` 中每条候选以 `[#${index}] tool=` 开头；同一 case 的 index 集合与 CANDIDATES 顺序一一对应，且不含 `seq`/`callId` 字面量。
+1. **长度**：`SLIM_SYSTEM_PROMPT_ZH.length === 1199`（字符数），`ceil(length / CHARS_PER_TOKEN) === 300`（`CHARS_PER_TOKEN=4`，与 `@deepseek-ai/dsh-token-meter/estimate` 同口径）；`SLIM_SYSTEM_PROMPT_EN.length === 2819`，words ∈ [300,500]。
+2. **锚点**（`ZH.includes(...)` 全为 true）：`【角色】`、`【输入】`、`【判定顺序（先匹配）】`、`【硬规则】`、`【输出契约】`、`structured_output`、`只调用一次`、`0 基`、`未列出=保留`、`KEEP`、`[elided by context-slimmer]`、`不得把失败写成成功`、`index 不得重复/越界`、`300 tokens`、`items 可为空`。
+3. **顺序**：`ZH.indexOf('安全/敏感') < ZH.indexOf('失败/报错') < ZH.indexOf('已被取代') < ZH.indexOf('可重算 bulk') < ZH.indexOf('部分相关') < ZH.indexOf('网页/搜索') < ZH.indexOf('写入/编辑') < ZH.indexOf('超大输出') < ZH.indexOf('无关') < ZH.indexOf('模糊')`；任一 label 缺失也 fail。
+4. **禁止词**：`ZH` 不含 `keep`（小写）、`class`、`confidence`、`TRIM`、`REPLACE`、`slim_tool_results`（R5 后不得再出现旧工具名）、U+FFFD 替换字符。
+5. **一致性**：`SLIM_TOOL_DESCRIPTION` words ∈ [100,120]；四个参数 description 与 §2 逐字相等（`===`）；`STRUCTURED_OUTPUT_TOOL === 'structured_output'`；`SLIM_PARAMETER_DESCRIPTIONS.summary` 含 `shown in the UI details and run metadata.`；`Object.keys(SLIM_PARAMETERS.properties)` 为 `['items','summary']`、`additionalProperties === false`、op enum 为 `drop,trim`、schema 中无 `maxItems`。
+6. **渲染**：`renderPayload()` 每条候选以 `[#${index}] tool=` 开头、RECENT 用 `recent[#N]`；`payload` 不含 `callId`/`seq=` 字面量；`buildSlimTaskMessage()` 只含 1 个 text block，且 system prompt 在前、`DATA_BOUNDARY` 在后。
 
-> 若 core-dev 选择把 4 段字符串放进独立 `prompt-text.js`，请让 `prompt.js` 重新导出，快照测试仍按上述常量名与长度断言，避免测试与实现耦合。
+> 若 core-dev 后续把字符串拆到独立 `prompt-text.js`，请让 `prompt.js` 重新导出，快照测试仍按上述常量名与长度断言，避免测试与实现耦合。
