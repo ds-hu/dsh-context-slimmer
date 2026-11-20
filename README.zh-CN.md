@@ -91,19 +91,19 @@ bundle patch 会为每个模块插入一行；每一行从 profile 解析自己�
 
 对话流中的原生风格行（`已精简工具调用结果 · 1 项 · 释放 24,181 字符`）：
 
-![chat row](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-chat-zh.png)
+![chat row](docs/screenshots/chat-row-zh.png)
 
 展开后可看到本次精简明细（item / trigger / model）：
 
-![detail](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-chat-detail.png)
+![detail](docs/screenshots/chat-detail-zh.png)
 
 轨迹视图里模型侧看到的就是被替换后的结果（`[elided by context-slimmer]`）：
 
-![trajectory](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-trajectory.png)
+![trajectory](docs/screenshots/trajectory-zh.png)
 
 原生插件面板中的模块（可独立开关/配置）：
 
-![plugins](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-plugins.png)
+![plugins](docs/screenshots/plugins-panel-zh.png)
 
 ## 开发
 

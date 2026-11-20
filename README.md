@@ -116,19 +116,19 @@ All screenshots come from a real DeepSeek Harness instance started in GitHub Act
 
 The native-looking row in the conversation flow (`已精简工具调用结果 · 1 项 · 释放 24,181 字符`):
 
-![chat row](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-chat-zh.png)
+![chat row](docs/screenshots/chat-row-zh.png)
 
 Expanded detail of the applied plan (item / trigger / model):
 
-![detail](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-chat-detail.png)
+![detail](docs/screenshots/chat-detail-zh.png)
 
 The trajectory shows what the model actually sees after replacement (`[elided by context-slimmer]`):
 
-![trajectory](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-trajectory.png)
+![trajectory](docs/screenshots/trajectory-zh.png)
 
 The module in the native Plugins panel (toggle/config per module):
 
-![plugins](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-plugins.png)
+![plugins](docs/screenshots/plugins-panel-zh.png)
 
 ## Development
 
