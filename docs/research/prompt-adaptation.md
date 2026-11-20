@@ -2,7 +2,8 @@
 
 - **文档**：`docs/research/prompt-adaptation.md`
 - **版本**：v1（2026-11-20）
-- **v1.2（2026-11-20）**：planner 提交工具改为 native `structured_output`（managed fork + `outputSchema`，DEV-9）；提示词全文以 `docs/research/prompt-final.md` v1.2 为准（本文 §4/§5 保留为 v1.1 历史快照）。
+- **v1.2（2026-11-20）**：planner 提交工具改为 native `structured_output`（managed fork + `outputSchema`，DEV-9）。
+- **v1.3（2026-11-20）**：R6 —— 移除 `path=` 证据校验（仅校验 URL 与 `file:line`），提示词新增引用格式约束；§4/§5 提示词全文已同步至 prompt-final.md v1.3（ZH 1237 chars / 310 tokens、EN 2943 chars / 440 words），§8.3 同步更新。
 - **状态**：`packages/core/lib/prompt.js` 的**权威依据**。core-dev 请逐字复制本文 §4/§5/§6 的字符串，不要重排、不要"优化"措辞；如需改动先在此文档记录差异。
 - **上游**：`docs/research/context-irrelevance-2026.md`（证据，下称"报告"）、`docs/research/slimming-policy.md`（通用规则集）、`docs/architecture.md` §3.2–3.4（插件契约）。
 - **适配目标**：把报告 §10 的"自由 JSON 决策 schema"收敛成插件 `slim_tool_results` 的严格工具参数 `{summary, items:[{index, op:'drop'|'trim', text?, reason?}]}`。
@@ -15,7 +16,7 @@
 2. 提示词必须让模型**只调用一次** `slim_tool_results`，且 `items` 只含"要改"的候选；`items: []` 是合法的 no-op，但仍要调用一次（否则 fork activation 无法收尾）。
 3. 失败证据**默认 trim 保留证据**，只有"同一失败的重复重试"才 drop；这是对 `docs/architecture.md` §3.4"相关但失败→drop + 经验教训"的**有意偏差**（理由见 §7，需写入 `docs/dev-notes.md`）。
 4. `text` 一律以 `[elided by context-slimmer]` 开头，自描述、可重取；`drop` 的替换文本由**宿主**按模板生成（模型不提供）。
-5. 中文提示词正文 **1199 字符**（按项目 token-meter 口径 300 tokens；按中文字符感知保守上界约 797 tokens；即便按最悲观 1 字符=1 token 也仅 1199），满足 ≤1200 tokens 约束。
+5. 中文提示词正文 **1237 字符**（按项目 token-meter 口径 **310 tokens**；R6 引用格式约束使其由 300 → 310，正文 `text` 字段上限仍是 300 tokens，二者不同；中文字符感知保守上界约 828 tokens；现实 BPE 约 712 tokens；最悲观 1 字符=1 token 为 1237）。
 
 ---
 
@@ -118,12 +119,12 @@ export function renderPayload({ task, constraints, recent, candidates }) { /* �
 
 ---
 
-## 4. 最终中文 system prompt（逐字；1199 字符）
+## 4. 最终中文 system prompt（逐字；1237 字符）
 
-> 计数：1199 chars（CJK 471 / ASCII 569 / 其他 159）。按项目 `dsh-token-meter` 固定密度（4 chars/token）= **300 tokens**；中文字符感知保守上界 ≈ **797 tokens**；现实 BPE 估计 ≈ **688 tokens**；最悲观 1 字符=1 token 也仅 **1199**。满足 ≤1200 tokens。
+> 计数：1237 chars（CJK 495 / ASCII 579 / 其他 163）。按项目 `dsh-token-meter` 固定密度（4 chars/token）= **310 tokens**（R6 引用格式约束使其由 300 → 310；正文 `text` 字段上限仍是 300 tokens，二者不同）；中文字符感知保守上界 ≈ **828 tokens**；现实 BPE 估计 ≈ **712 tokens**；最悲观 1 字符=1 token 为 **1237**。
 
 ```text
-【角色】你是编码 Agent 的上下文精简器：从 CANDIDATES（旧工具结果）中选出需精简的条目，调用一次 slim_tool_results 提交计划；不解决任务、不对话、不调用工具。
+【角色】你是编码 Agent 的上下文精简器：从 CANDIDATES（旧工具结果）中选出需精简的条目，调用一次 structured_output 提交计划；不解决任务、不对话、不调用工具。
 
 【输入】TASK 任务；CONSTRAINTS 逐字约束；RECENT 最近结果；CANDIDATES 每条：[#N] tool=… error=… chars=… + 原文；# 后数字即 index（0 基，非 seq），勿重编号。
 
@@ -139,7 +140,7 @@ export function renderPayload({ task, constraints, recent, candidates }) { /* �
 9 无关（与任务/计划/最近决策无引用）→drop。
 10 模糊→不列出。
 
-【硬规则】只调用一次 slim_tool_results；无自然语言、无其他工具。summary≤80 字、items≤12、reason≤40 字。items 仅列需改条目；未列出=保留；不要写 KEEP 项。trim 的 text 以“[elided by context-slimmer]”开头，自描述可重取：工具/call、保留内容（路径/命令/URL+行号）、原文长度、重取方式；不得只留结论。不虚构事实；错误串/数值/路径/URL/行号逐字；不得把失败写成成功。不改配对/工具名/参数；每条候选最多一个 item；index 不得重复/越界。不确定→不列出，宁可少精简、不可错删。text≤300 tokens 且≤原文50%；整批压缩率≥50%。
+【硬规则】只调用一次 structured_output；无自然语言、无其他工具。summary≤80 字、items≤12、reason≤40 字。items 仅列需改条目；未列出=保留；不要写 KEEP 项。trim 的 text 以“[elided by context-slimmer]”开头，自描述可重取：工具/call、保留内容（路径/命令/URL+行号）、原文长度、重取方式；不得只留结论。不虚构事实；错误串/数值/路径/URL/行号逐字；不得把失败写成成功。引用文件用普通路径文本，勿写 path=、URL，或原文不存在的文件:行号。不改配对/工具名/参数；每条候选最多一个 item；index 不得重复/越界。不确定→不列出，宁可少精简、不可错删。text≤300 tokens 且≤原文50%；整批压缩率≥50%。
 
 【输出契约】严格 JSON，单次工具调用：
 {"summary":"清理无关大输出","items":[{"index":3,"op":"drop","reason":"与任务无关"}]}
@@ -152,7 +153,7 @@ drop 无 text；trim 必带 text；非法项整单拒绝；无改动也调用一
 ## 5. English system prompt（parity version）
 
 ```text
-[ROLE] You are the context slimmer for a coding agent. From CANDIDATES (old tool results), choose the entries to slim and submit exactly one plan via a single slim_tool_results call. Do not solve the task, do not talk to the user, do not call other tools.
+[ROLE] You are the context slimmer for a coding agent. From CANDIDATES (old tool results), choose the entries to slim and submit exactly one plan via a single structured_output call. Do not solve the task, do not talk to the user, do not call other tools.
 
 [INPUT] TASK; CONSTRAINTS (verbatim); RECENT (never touched); each CANDIDATES entry is "[#N] tool=... error=... chars=..." followed by the original text. The number after # is the index (0-based, not the session seq); never renumber.
 
@@ -168,7 +169,7 @@ drop 无 text；trim 必带 text；非法项整单拒绝；无改动也调用一
 9 Irrelevant (no reference to task/plan/recent decisions) -> drop.
 10 Ambiguous -> omit.
 
-[HARD RULES] Exactly one slim_tool_results call; no prose, no other tools. summary<=80 chars, items<=12, reason<=40 chars. items contains only entries to change; anything unlisted is kept; never add KEEP items. trim text must start with "[elided by context-slimmer]" and be self-describing and recoverable: tool/call, what was kept (path/command/URL + line numbers), original size, how to re-fetch; never keep a conclusion without its source. Never invent facts; quote error strings/numbers/paths/URLs/line numbers exactly; never report a failure as success. Preserve tool/call pairing, tool names, arguments; at most one item per candidate; no duplicate or out-of-range index. If unsure, omit; prefer under-slimming over deleting needed state. text <= 300 tokens and <= 50% of the original; aim for >= 50% batch shrink.
+[HARD RULES] Exactly one structured_output call; no prose, no other tools. summary<=80 chars, items<=12, reason<=40 chars. items contains only entries to change; anything unlisted is kept; never add KEEP items. trim text must start with "[elided by context-slimmer]" and be self-describing and recoverable: tool/call, what was kept (path/command/URL + line numbers), original size, how to re-fetch; never keep a conclusion without its source. Never invent facts; quote error strings/numbers/paths/URLs/line numbers exactly; never report a failure as success. Reference files as plain path text; never write path=, URLs, or file:line forms that do not occur verbatim in the original. Preserve tool/call pairing, tool names, arguments; at most one item per candidate; no duplicate or out-of-range index. If unsure, omit; prefer under-slimming over deleting needed state. text <= 300 tokens and <= 50% of the original; aim for >= 50% batch shrink.
 
 [OUTPUT CONTRACT] Strict JSON in a single tool call:
 {"summary":"clean up irrelevant large output","items":[{"index":3,"op":"drop","reason":"irrelevant to task"}]}
@@ -177,7 +178,7 @@ trim uses the same shape and must include text:
 drop has no text; trim requires text; any invalid item rejects the whole plan; if nothing needs changing, still call once with an empty items array.
 ```
 
-> 英文版 419 words / 2,819 chars ≈ 565 tokens，同样 <1200；与中文版语义逐条对应，便于 locale 切换与回归用例复用。
+> 英文版 440 words / 2,943 chars ≈ 590 tokens；与中文版语义逐条对应（R6 后新增 “never write path=…” 引用约束），便于 locale 切换与回归用例复用。
 
 ---
 
@@ -265,7 +266,7 @@ drop has no text; trim requires text; any invalid item rejects the whole plan; i
 
 1. **不要把 KEEP 项塞进 `items`。** 未列入 = 保留；`items: []` 合法（no-op）。如果模型/代码把 KEEP 项也写进 items，会触发"无 text 的 trim"或"drop 了该保留的证据"两类事故。
 2. **`index` 是 CANDIDATES 的 0 基下标，不是 `seq`、不是 1-based 序号。** payload 必须渲染 `[#${index}]`（不要 `index+1`）；校验时 index 必须落在本次候选集合内，且不能指向 `protectRecent`、已替换、越界条目。宿主内部用 `index → {callId, seq}` 映射，**不要**把 seq 暴露给模型。
-3. **`text` 不得虚构原文没有的事实。** 宿主只能机械校验前缀/长度/控制字符，无法验证语义，所以：① 提示词硬规则必须保留；② 回归用例（`docs/research/prompt-regression.md`）必须覆盖"把失败写成成功""编造行号"两类；③ 建议 core 在 apply 前做保守检查：`text` 中出现的所有 URL/路径/行号若在原文中不存在则该条拒绝（简单 substring 检查即可，误杀可接受）。
+3. **`text` 不得虚构原文没有的事实。** 宿主只能机械校验前缀/长度/控制字符，无法验证语义，所以：① 提示词硬规则必须保留；② 回归用例（`docs/research/prompt-regression.md`）必须覆盖"把失败写成成功""编造行号"两类；③ 宿主对 `text` 的证据校验只覆盖 **URL** 与 **`file:line`**（必须逐字出现在原文，否则整单拒绝）；**`path=`/纯路径不校验**——R6 实测：模型常用 `path=/abs/file` 标注“改写后的路径”，并非原文逐字证据，旧规则曾误杀全部合法 trim 计划（CI e2e 根因），故移除；提示词同时要求引用文件用普通路径文本、勿写 `path=`/URL/原文不存在的 `file:line`。
 4. **只调用一次工具**：子 Agent 的 `tools/pre-execute` 守卫要把 `slim_tool_results` 以外的调用全部 deny，并给模型一个明确的"只能调用一次"约束；否则可能出现二次调用/等待超时。
 5. **`reason`/`summary` 直接进 UI**：必须折叠换行、去 `|`（表格注入）、截断 40/80 字；`text` 替换时保留原 `isError`，不要因 `trim` 把失败结果变成成功状态。
 6. **原子性**：先全量校验计划 → 再逐条 append 替换事件；任何一条失败 → 整单回滚为 no-op（或按 architecture 记录部分失败），并写 `plugin:` record（`status: 'rejected'|'failed'`），主上下文绝不能被半改。

@@ -96,3 +96,29 @@
 - 风险：fork provider 必须声明 `capabilities.outputSchema` 与 `agentOptions`（安装版 `dsh-subagent-fork-in-process` 两者均为 true；`agentOptions` 用于 `model`/`maxTokens` 覆盖）。若未来 provider 不支持，`startActivation` 抛错 → 本批 `failed`、主循环无感。
 
 **文档同步**：`docs/research/prompt-final.md` 由 paper-researcher 升 v1.2 记录本次工具名迁移（Lead 已安排），实现以本仓 `prompt.js` 常量为准。
+
+---
+
+## DEV-10 可选诊断文件（`diagnosticsFile`）
+
+**用途**：CI e2e/线上排查“子 Agent 已完成但 0 prune/0 replace”这类**静默 no-op**。精简链路跨进程/跨子会话，仅靠宿主日志很难定位卡在 trigger、计划提取、计划校验还是替换落地。
+
+**决策**：`Config.diagnosticsFile`（string，默认 `''` = 关闭）。非空时 `SlimmerHost` 在关键节点向该路径 append JSONL，每行一个 `{ts, kind, sessionId?, ...}`：
+
+| kind | 关键字段 |
+| :-- | :-- |
+| `trigger` | observedCalls/observedChars/observedErrorCalls、targets[{seq,tool,isError,chars}] |
+| `activation-start` | childId、targets 数量 |
+| `activation-error` | stage（start/result）、error（≤500 字符） |
+| `result` | stopReason、structuredType、outputBlockCount、textRawLength |
+| `plan` | 提取到的计划快照（items[].text 先截 120 code points，整体 JSON ≤4000 字符） |
+| `validate` | ok；失败时 code + message（完整 message 便于定位） |
+| `apply` | items/charsSaved/degraded/metaLanded，或异常 message |
+| `no-op` | reason: no-text-plan / no-structure / empty-items |
+
+**安全与边界**：
+- 默认关闭；生产环境无需开启。只写派生字段；计划文本先截断，**绝不写入完整工具结果原文**（`plan.items[].text` 120 code points、错误 500、整行 JSON 4000）。
+- 所有写入 `try/catch` 吞掉异常：诊断失败绝不影响主 Agent 循环。
+- 路径由用户/CI 提供，需运行进程可写；不自动建目录、不轮转（CI 每次 fresh 目录，本地按需自行清理）。
+- CI：`scripts/ci/slimmer-config.default.json` 设置为 `/tmp/ci-artifacts/slimmer-diagnostics.jsonl`，verify.yml 的 artifact 已覆盖该目录；失败时直接 grep `"kind":"validate"` / `"kind":"no-op"` 定位根因。
+- 实现：`packages/core/lib/config.js`（字段/校验）、`packages/tool-result-slimmer/lib/index.js` 的 `SlimmerHost.diag()` 与 `sanitizePlanForLog()`；测试 `host.test.mjs` 覆盖“成功/失败路径均有合法 JSONL”“未配置不创建文件”。

@@ -349,6 +349,16 @@ jobs:
               cat "$CI_ARTIFACTS_DIR/screenshot-report.json"
               echo '```'
             fi
+            if [ -f "$CI_ARTIFACTS_DIR/slimmer-diagnostics.jsonl" ]; then
+              echo
+              echo "Slimmer diagnostics (last 40 events; opt-in debug stream):"
+              echo '```json'
+              tail -40 "$CI_ARTIFACTS_DIR/slimmer-diagnostics.jsonl" | cut -c1-600
+              echo '```'
+            else
+              echo
+              echo "_No slimmer diagnostics file (the plugin is disabled, or the run never reached a pre-step)._"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload verification evidence

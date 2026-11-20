@@ -10,5 +10,6 @@
   "promptLocale": "zh",
   "model": {
     "provider": "inherit"
-  }
+  },
+  "diagnosticsFile": "/tmp/ci-artifacts/slimmer-diagnostics.jsonl"
 }

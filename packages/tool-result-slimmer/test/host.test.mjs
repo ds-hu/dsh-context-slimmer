@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import test from 'node:test'
 
 import {
@@ -293,4 +296,101 @@ test('estimateMessageTokens uses the token meter, then the 4-chars fallback', ()
 
 test('config errors surface as ConfigError from the row schema', () => {
   assert.equal(typeof ConfigError, 'function')
+})
+
+
+test('diagnosticsFile writes sanitized JSONL for a successful run', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'slimmer-diag-'))
+  const diagnosticsFile = path.join(directory, 'diagnostics.jsonl')
+  try {
+    const ctx = createFakeCtx()
+    const session = createFakeSession()
+    ctx.nextResult = {
+      stopReason: 'completed',
+      output: [],
+      structured: {
+        summary: '清理',
+        items: [
+          { index: 1, op: 'trim', text: '[elided by context-slimmer] read_file; original 2000 chars; re-run to restore', reason: 'bulk' },
+          { index: 0, op: 'drop', reason: '无关' },
+        ],
+      },
+    }
+    const host = new SlimmerHost(ctx, { ...config, diagnosticsFile })
+    host.install()
+    await preStep(ctx, session)
+    assert.equal(fs.existsSync(diagnosticsFile), false, 'baseline pre-step writes nothing')
+    appendObserved(ctx, session, 'call-1', 'bash', 'SECRET_TOOL_TEXT\n'.repeat(100))
+    appendObserved(ctx, session, 'call-2', 'read_file', 'SECRET_TOOL_TEXT\n'.repeat(200))
+    await preStep(ctx, session)
+    assert.equal(fs.existsSync(diagnosticsFile), true)
+    const raw = fs.readFileSync(diagnosticsFile, 'utf8')
+    const records = raw.trim().split('\n').map((line) => JSON.parse(line))
+    assert.equal(records.length >= 6, true, `expected several diagnostics lines, got ${records.length}`)
+    const kinds = records.map((record) => record.kind)
+    for (const kind of ['trigger', 'activation-start', 'result', 'plan', 'validate', 'apply']) {
+      assert.equal(kinds.includes(kind), true, `missing diagnostic kind ${kind}`)
+    }
+    assert.equal(records.every((record) => typeof record.ts === 'number' && record.ts > 0), true)
+    assert.equal(records.every((record) => record.sessionId === session.id), true)
+    const trigger = records.find((record) => record.kind === 'trigger')
+    assert.deepEqual(trigger.targets.map((target) => target.tool), ['bash', 'read_file'])
+    const plan = records.find((record) => record.kind === 'plan')
+    assert.equal(typeof plan.plan, 'string')
+    assert.equal(plan.plan.length <= 4000, true)
+    const validate = records.find((record) => record.kind === 'validate')
+    assert.equal(validate.ok, true)
+    const apply = records.find((record) => record.kind === 'apply')
+    assert.equal(apply.items, 2)
+    assert.equal(apply.metaLanded, true)
+    assert.equal(apply.degraded, false)
+    // No full tool-result text ever reaches the diagnostics file.
+    assert.equal(raw.includes('SECRET_TOOL_TEXT'.repeat(20)), false)
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('diagnosticsFile records no-op/failure reasons; disabled config writes nothing', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'slimmer-diag-'))
+  const diagnosticsFile = path.join(directory, 'diagnostics.jsonl')
+  try {
+    const ctx = createFakeCtx()
+    const session = createFakeSession()
+    ctx.nextResult = { stopReason: 'completed', output: [{ type: 'text', text: 'plain text, no json' }] }
+    const host = new SlimmerHost(ctx, { ...config, diagnosticsFile })
+    host.install()
+    await preStep(ctx, session)
+    appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
+    appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
+    await preStep(ctx, session)
+    const records = fs.readFileSync(diagnosticsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    const noop = records.find((record) => record.kind === 'no-op')
+    assert.equal(noop.reason, 'no-text-plan')
+    assert.equal(records.some((record) => record.kind === 'apply'), false)
+
+    // A plan that validatePlan rejects is recorded with its stable code.
+    ctx.nextResult = { stopReason: 'completed', output: [], structured: { summary: 's', items: [{ index: 9, op: 'drop' }] } }
+    appendObserved(ctx, session, 'call-3', 'bash', 'c'.repeat(1000))
+    appendObserved(ctx, session, 'call-4', 'read_file', 'd'.repeat(2000))
+    await preStep(ctx, session)
+    const all = fs.readFileSync(diagnosticsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    const rejected = all.find((record) => record.kind === 'validate' && record.ok === false)
+    assert.equal(rejected.code, 'item-index-out-of-range')
+    assert.equal(typeof rejected.message, 'string')
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+
+  // Default configuration (empty diagnosticsFile) never creates a file.
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  ctx.nextResult = { stopReason: 'completed', output: [], structured: { summary: 's', items: [] } }
+  const host = new SlimmerHost(ctx, { ...config })
+  host.install()
+  await preStep(ctx, session)
+  appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
+  appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
+  await preStep(ctx, session)
+  assert.equal(host.diag('trigger', { observedCalls: 0 }), undefined)
 })

@@ -46,6 +46,7 @@ export const CONFIG_KEYS = Object.freeze([
   'forkProvider',
   'promptLocale',
   'model',
+  'diagnosticsFile',
 ])
 
 /** Keys accepted inside `model`. */
@@ -63,6 +64,7 @@ export const DEFAULT_CONFIG = deepFreeze({
   timeoutMs: 120000,
   forkProvider: 'fork',
   promptLocale: 'auto',
+  diagnosticsFile: '',
   model: {
     provider: INHERIT,
     model: INHERIT,
@@ -102,6 +104,9 @@ export const Config = z.object({
   ),
   promptLocale: z.union([z.const('auto'), z.const('zh'), z.const('en')]).default(DEFAULT_CONFIG.promptLocale).description(
     'Language of the background prompt: "zh" (default behaviour), "en", or "auto" (currently resolves to Chinese; kept as a forward-compatible hint).',
+  ),
+  diagnosticsFile: z.string().default(DEFAULT_CONFIG.diagnosticsFile).description(
+    'Optional absolute path of a JSONL diagnostics file for this module (empty = disabled, default). Each line is one sanitized event (trigger, activation, plan, validate, apply, no-op); tool-result text is truncated and never stored in full. Intended for CI debugging; leave empty in normal use.',
   ),
   model: z.object({
     provider: z.string().default(INHERIT).description(
@@ -145,7 +150,12 @@ export function resolveConfig(raw = {}) {
       throw new ConfigError('unknown-model-key', `unknown configuration key "model.${key}" (allowed: ${MODEL_KEYS.join(', ')})`)
     }
   }
-  const validated = Config(input)
+  let validated
+  try {
+    validated = Config(input)
+  } catch (error) {
+    throw new ConfigError('bad-config', error instanceof Error ? error.message : String(error))
+  }
   if (validated.everyNToolCalls === 0 && validated.minChars === 0) {
     throw new ConfigError(
       'no-trigger',
@@ -194,6 +204,7 @@ export function resolveConfig(raw = {}) {
     timeoutMs: validated.timeoutMs,
     forkProvider: validated.forkProvider,
     promptLocale: validated.promptLocale,
+    diagnosticsFile: validated.diagnosticsFile,
     model: {
       provider,
       model,

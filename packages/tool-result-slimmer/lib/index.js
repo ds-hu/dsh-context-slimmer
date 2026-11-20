@@ -36,6 +36,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 
 import { Config, ConfigError, agentOptionsOverride, recordModel, resolveConfig } from '@ds-hu/dsh-context-slimmer-core/config'
 import { CounterStore, createCounter, noteToolResult, resetCounter, shouldTrigger, triggerSnapshot } from '@ds-hu/dsh-context-slimmer-core/counters'
@@ -232,6 +234,8 @@ export class SlimmerHost {
     this.disposers = []
     /** Batch payload capability cache (Lead ruling R1 degradation). */
     this.extensionSupported = true
+    /** Diagnostics directory created once per host instance. */
+    this.diagnosticsDirReady = false
   }
 
   /** Mount every listener; safe to call once. */
@@ -265,6 +269,33 @@ export class SlimmerHost {
     }
     this.counters.clear()
     this.runs.clear()
+  }
+
+  /**
+   * Append one sanitized JSONL diagnostics line when `config.diagnosticsFile`
+   * is configured (opt-in, default off). Never throws and never stores
+   * tool-result text in full: callers pass bounded, derived fields only.
+   *
+   * @param {string} kind Fixed event kind (trigger/activation-start/…).
+   * @param {object} [details] Sanitized details; `sessionId` is added by the caller or here.
+   * @param {string} [sessionId] Session the event belongs to.
+   */
+  diag(kind, details = {}, sessionId) {
+    const file = this.config?.diagnosticsFile
+    if (typeof file !== 'string' || file.length === 0) return
+    try {
+      if (this.diagnosticsDirReady !== true) {
+        fs.mkdirSync(path.dirname(file), { recursive: true })
+        this.diagnosticsDirReady = true
+      }
+      fs.appendFileSync(
+        file,
+        `${JSON.stringify({ ts: Date.now(), kind, ...(sessionId === undefined ? {} : { sessionId }), ...details })}\n`,
+        'utf8',
+      )
+    } catch {
+      // Diagnostics must never disturb the main loop.
+    }
   }
 
   /**
@@ -380,6 +411,21 @@ export class SlimmerHost {
       minTargetChars: this.config.minTargetChars,
       excludeToolNames: [STRUCTURED_OUTPUT_TOOL],
     })
+    this.diag(
+      'trigger',
+      {
+        observedCalls: counter.observedCalls,
+        observedChars: counter.observedChars,
+        observedErrorCalls: counter.observedErrorCalls,
+        targets: targets.map((target) => ({
+          seq: target.seq,
+          tool: target.toolName,
+          isError: target.isError === true,
+          chars: target.chars,
+        })),
+      },
+      session.id,
+    )
     if (targets.length === 0) {
       this.counters.set(session.id, resetCounter(counter))
       return
@@ -439,6 +485,7 @@ export class SlimmerHost {
     const signal = parentSignal === undefined || parentSignal === null ? timeout : AbortSignal.any([parentSignal, timeout])
     const agentOptions = agentOptionsOverride(this.config)
     this.runs.set(childId, batch)
+    this.diag('activation-start', { childId, targets: targets.length }, session.id)
     let activation
     try {
       activation = await this.ctx.subagents.startActivation({
@@ -456,6 +503,7 @@ export class SlimmerHost {
       })
     } catch (error) {
       this.runs.delete(childId)
+      this.diag('activation-error', { stage: 'start', error: bounded(errorMessage(error), 500) }, session.id)
       this.ctx.logger?.warn?.(`context-slimmer: subagent start failed: ${errorMessage(error)}`)
       return STATUS_FAILED
     }
@@ -463,6 +511,7 @@ export class SlimmerHost {
     try {
       result = await activation.result
     } catch (error) {
+      this.diag('activation-error', { stage: 'result', error: bounded(errorMessage(error), 500) }, session.id)
       this.ctx.logger?.warn?.(`context-slimmer: subagent failed: ${errorMessage(error)}`)
       return STATUS_FAILED
     } finally {
@@ -473,21 +522,50 @@ export class SlimmerHost {
       }
       this.runs.delete(childId)
     }
+    const outputBlocks = Array.isArray(result?.output) ? result.output : []
+    const outputTextLength = outputBlocks.reduce(
+      (total, block) => total + (block?.type === 'text' && typeof block.text === 'string' ? Array.from(block.text).length : 0),
+      0,
+    )
+    this.diag(
+      'result',
+      {
+        stopReason: result?.stopReason ?? 'unknown',
+        structuredType: result?.structured === undefined ? 'undefined' : typeof result.structured,
+        outputBlockCount: outputBlocks.length,
+        textRawLength: outputTextLength,
+      },
+      session.id,
+    )
     if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
       this.ctx.logger?.warn?.(`context-slimmer: subagent stopped with ${String(result.stopReason)}`)
       return STATUS_FAILED
     }
     const plan = extractPlan(result)
+    this.diag('plan', { plan: sanitizePlanForLog(plan) }, session.id)
     if (plan === null) {
+      const reason = result?.structured === undefined ? 'no-text-plan' : 'no-structure'
+      this.diag('no-op', { reason }, session.id)
       this.ctx.logger?.debug?.('context-slimmer: subagent returned no plan; treating as no-op')
       return STATUS_NO_OP
     }
     const validation = validatePlan(plan, targets, { maxItems: this.config.maxTargets })
+    this.diag(
+      'validate',
+      {
+        ok: validation.ok,
+        ...(validation.ok ? {} : { code: validation.code, message: bounded(validation.message, 500) }),
+      },
+      session.id,
+    )
     if (!validation.ok) {
       this.ctx.logger?.warn?.(`context-slimmer: plan rejected (${validation.code}); nothing replaced`)
       return STATUS_REJECTED
     }
-    if (validation.plan.items.length === 0) return STATUS_NO_OP
+    if (validation.plan.items.length === 0) {
+      this.diag('no-op', { reason: 'empty-items' }, session.id)
+      return STATUS_NO_OP
+    }
     const tokenMeter = this.ctx.get?.('tokenMeter')
     try {
       const applied = applyPlan({
@@ -497,6 +575,16 @@ export class SlimmerHost {
         estimateTokens: (message) => estimateMessageTokens(tokenMeter, message),
         batch,
       })
+      this.diag(
+        'apply',
+        {
+          items: applied.totals.items,
+          charsSaved: applied.totals.charsSaved,
+          degraded: applied.degraded === true,
+          metaLanded: applied.metaLanded === true,
+        },
+        session.id,
+      )
       this.ctx.logger?.info?.(
         `context-slimmer: applied ${String(applied.totals.items)} items, saved ${String(applied.totals.charsSaved)} chars` +
           (applied.metaLanded ? '' : ' (UI metadata degraded: prune extension rejected)'),
@@ -507,6 +595,7 @@ export class SlimmerHost {
       }
       return STATUS_APPLIED
     } catch (error) {
+      this.diag('apply', { error: bounded(errorMessage(error), 500) }, session.id)
       this.ctx.logger?.warn?.(`context-slimmer: replacement failed: ${errorMessage(error)}`)
       return STATUS_FAILED
     }
@@ -533,6 +622,44 @@ function isSubagentSession(session) {
 function errorMessage(error) {
   const text = error instanceof Error ? error.message : String(error)
   return Array.from(text).slice(0, 200).join('')
+}
+
+/**
+ * Bound one string to `limit` code points (diagnostics only).
+ *
+ * @param {string} text Source text.
+ * @param {number} limit Maximum code points.
+ * @returns {string} Bounded text.
+ */
+function bounded(text, limit) {
+  return Array.from(text).slice(0, limit).join('')
+}
+
+/**
+ * Sanitized plan snapshot for the diagnostics file: per-item `text` is cut to
+ * 120 code points first, then the JSON is cut to 4000 chars, so a diagnostics
+ * line can never contain a full tool result.
+ *
+ * @param {object | null} plan Extracted plan.
+ * @returns {string | null} Bounded JSON, or null.
+ */
+function sanitizePlanForLog(plan) {
+  if (plan === null || typeof plan !== 'object') return plan === null ? null : bounded(String(plan), 4000)
+  try {
+    const sanitized = {
+      ...plan,
+      ...(Array.isArray(plan.items)
+        ? {
+            items: plan.items.map((item) =>
+              item !== null && typeof item === 'object' ? { ...item, ...(typeof item.text === 'string' ? { text: bounded(item.text, 120) } : {}) } : item,
+            ),
+          }
+        : {}),
+    }
+    return bounded(JSON.stringify(sanitized), 4000)
+  } catch {
+    return bounded(String(plan), 4000)
+  }
 }
 
 /**
