@@ -36,7 +36,7 @@ function parseArgs(argv) {
     sessionId: process.env.SESSION_ID ?? '',
     artifactsDir: process.env.CI_ARTIFACTS_DIR ?? join(process.env.RUNNER_TEMP ?? '/tmp', 'ci-artifacts'),
     uiText: process.env.SLIMMER_UI_TEXT ?? DEFAULT_UI_TEXT,
-    uiTextTimeoutMs: Number(process.env.SLIMMER_UI_TIMEOUT_MS ?? 45000),
+    uiTextTimeoutMs: Number(process.env.SLIMMER_UI_TIMEOUT_MS ?? 60000),
     locale: process.env.SLIMMER_UI_LOCALE ?? 'zh-CN',
     pluginNames: (process.env.SLIMMER_PLUGIN_NAME ?? 'Context Slimmer').split(','),
     failOnMissingUiText: process.env.SLIMMER_FAIL_ON_MISSING_UI_TEXT === '1',
@@ -172,23 +172,144 @@ async function dismissNotices(page, timeoutMs = 12000) {
   return dismissed;
 }
 
-async function openScenarioSession(page, sessionId, artifactsDir) {
+/**
+ * Click one sidebar session row and verify the conversation actually opened.
+ * A late preview/sign-in overlay can intercept the click even though the modal
+ * was already dismissed once, and Playwright's click() retries are cancelled by
+ * the mask, so re-dismiss and retry a few times.
+ *
+ * @param {import('playwright').Page} page Browser page.
+ * @param {import('playwright').Locator} row Session tree row.
+ * @returns {Promise<boolean>} Whether the row reports itself selected.
+ */
+async function clickSessionRow(page, row) {
+  const started = Date.now();
+  for (let attempt = 0; attempt < 10 && Date.now() - started < 12000; attempt += 1) {
+    await dismissOverlaysOnce(page);
+    await page.waitForTimeout(attempt === 0 ? 300 : 800);
+    if (attempt % 3 === 0) {
+      try { await row.click({ timeout: 5000 }); }
+      catch { await dismissOverlaysOnce(page); await row.click({ timeout: 5000, force: true }).catch(() => {}); }
+    } else if (attempt % 3 === 1) {
+      // Force click bypasses a lingering mask; the workspace restore may also
+      // have re-rendered the row between attempts.
+      await row.click({ timeout: 5000, force: true }).catch(() => {});
+    } else {
+      // Keyboard activation as a last resort for rows that swallow pointer events.
+      await row.focus().catch(() => {});
+      await page.keyboard.press('Enter').catch(() => {});
+    }
+    await page.waitForTimeout(1000);
+    await dismissOverlaysOnce(page);
+    if ((await row.getAttribute('aria-selected').catch(() => null)) === 'true') {
+      return { selected: true, selectedAfterMs: Date.now() - started };
+    }
+  }
+  return { selected: false, selectedAfterMs: Date.now() - started };
+}
+
+/**
+ * Wait until the sidebar session row set has not changed for two consecutive
+ * one-second samples. The Web UI asynchronously restores the last workspace/
+ * session after boot; clicking before that settles gets overwritten.
+ *
+ * @param {import('playwright').Page} page Browser page.
+ * @param {number} [maxWaitMs] Maximum stabilization wait.
+ * @returns {Promise<number>} Number of session rows when stable.
+ */
+async function waitForSidebarStable(page, maxWaitMs = 10000) {
+  const started = Date.now();
+  let previous = -1;
+  let stableCount = 0;
+  while (Date.now() - started < maxWaitMs) {
+    const count = await page.locator('[role="treeitem"][data-row-key^="session:"]').count().catch(() => -1);
+    if (count === previous) {
+      stableCount += 1;
+      if (stableCount >= 2) return count;
+    } else {
+      previous = count;
+      stableCount = 0;
+    }
+    await page.waitForTimeout(1000);
+  }
+  return previous;
+}
+
+/**
+ * Whether the conversation main area shows the opened session (not the blank
+ * new-session composer). The sidebar alone is not proof: it is always present.
+ *
+ * @param {import('playwright').Page} page Browser page.
+ * @returns {Promise<{opened: boolean, snippet: string}>} Main-area evidence.
+ */
+async function mainAreaShowsSession(page) {
+  return page.evaluate(() => {
+    const main = document.querySelector('main') ?? document.body;
+    const text = main?.textContent ?? '';
+    const tabs = document.querySelectorAll('[role="tab"]').length;
+    const opened = tabs >= 2 || /You are running a fixed|CI_SCENARIO_DONE|子智能体|Trajectory/.test(text) || text.length > 400;
+    return { opened, snippet: (main?.innerText ?? text).slice(0, 500) };
+  }).catch(() => ({ opened: false, snippet: '' }));
+}
+
+async function openScenarioSession(page, sessionId, artifactsDir, retriedReload = false) {
+  const base = { retriedReload, pageUrl: sanitizeUrl(page.url()) };
+  const attemptOpen = async (row, selectors) => {
+    const result = await clickSessionRow(page, row);
+    const main = await mainAreaShowsSession(page);
+    return {
+      ...base,
+      ...selectors,
+      selectedAfterMs: result.selectedAfterMs,
+      selected: result.selected,
+      mainOpened: main.opened,
+      status: result.selected && main.opened ? 'opened-exact' : 'opened-but-blank',
+    };
+  };
   if (sessionId) {
     const row = page.locator(`[role="treeitem"][data-row-key="session:${sessionId}"]`);
     if (await row.waitFor({ state: 'visible', timeout: 30000 }).then(() => true).catch(() => false)) {
-      await row.click({ timeout: 5000 }).catch(() => {});
-      return { status: 'opened-exact', selector: `session:${sessionId}` };
+      const opened = await attemptOpen(row, { selector: `session:${sessionId}` });
+      if (opened.status === 'opened-exact') return opened;
+      if (!retriedReload) {
+        // The async workspace restore can win the race once; a reload puts the
+        // persisted selection on the same footing as a fresh click.
+        warn('session did not open on the first pass; reloading the page once and retrying');
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+        await page.waitForTimeout(2500);
+        await dismissNotices(page, 6000);
+        await waitForSidebarStable(page);
+        return openScenarioSession(page, sessionId, artifactsDir, true);
+      }
+      return opened;
     }
     warn(`session row session:${sessionId} not found; trying the first visible session row`);
   }
   const anyRow = page.locator('[role="treeitem"][data-row-key^="session:"]').first();
   if (await anyRow.waitFor({ state: 'visible', timeout: 15000 }).then(() => true).catch(() => false)) {
     const key = await anyRow.getAttribute('data-row-key').catch(() => null);
-    await anyRow.click({ timeout: 5000 }).catch(() => {});
-    return { status: 'opened-fallback', selector: key };
+    const opened = await attemptOpen(anyRow, { selector: key });
+    return opened.status === 'opened-exact' ? opened : { ...opened, status: 'opened-fallback' };
   }
   await page.screenshot({ path: join(artifactsDir, 'verify-sidebar-missing.png'), fullPage: true }).catch(() => {});
-  return { status: 'missing', selector: null };
+  return { ...base, status: 'missing', selector: null };
+}
+
+/**
+ * Whether the slimmer UI row is present (DOM text, independent of visibility
+ * heuristics) or the text appears anywhere in the rendered body.
+ *
+ * @param {import('playwright').Page} page Browser page.
+ * @param {string} text Row title text.
+ * @returns {Promise<boolean>} Whether the row/body carries the text.
+ */
+async function uiTextPresent(page, text) {
+  return page.evaluate((needle) => {
+    const rows = [...document.querySelectorAll('.ctxslim-row, [data-ctxslimmer-row]')];
+    if (rows.some((row) => (row.textContent ?? '').includes(needle))) return true;
+    const body = document.body;
+    return (body?.innerText ?? '').includes(needle) || (body?.textContent ?? '').includes(needle);
+  }, text).catch(() => false);
 }
 
 async function main() {
@@ -261,8 +382,15 @@ async function main() {
   await page.waitForTimeout(1200);
   report.title = await page.title().catch(() => '');
 
+  // The Web UI restores the last workspace/session asynchronously after boot;
+  // clicking before the sidebar settles gets overwritten by that restore().
+  const stableRows = await waitForSidebarStable(page);
+  report.notes.push(`sidebar session rows stabilized at ${stableRows} before opening the session`);
   const session = await openScenarioSession(page, args.sessionId, args.artifactsDir);
   report.session = session;
+  if (!session.selected || !session.mainOpened) {
+    report.notes.push(`session did not open as requested: ${JSON.stringify(session).slice(0, 300)}`);
+  }
   await page.waitForTimeout(600);
   // Opening the first session can trigger the preview notice; clear it again so
   // the conversation panel is not covered by the modal mask.
@@ -271,16 +399,27 @@ async function main() {
   await page.waitForTimeout(1200);
 
   // The conversation panel loads persisted events; give it a moment to render.
-  await page.waitForFunction(() => (document.body?.innerText ?? '').length > 400, undefined, { timeout: 30000 }).catch(() => {
-    report.notes.push('conversation body stayed short; screenshots may show an empty state');
-  });
+  {
+    const conversationDeadline = Date.now() + 20000;
+    let conversationOpened = false;
+    while (Date.now() < conversationDeadline) {
+      const main = await mainAreaShowsSession(page);
+      if (main.opened) { conversationOpened = true; break; }
+      await dismissOverlaysOnce(page);
+      await page.waitForTimeout(500);
+    }
+    if (!conversationOpened) {
+      const main = await mainAreaShowsSession(page);
+      report.notes.push(`conversation main area stayed blank; main text=${JSON.stringify(main.snippet.slice(0, 300))}`);
+    }
+  }
 
   let uiTextFound = false;
   const started = Date.now();
   let lastDismissAttempt = 0;
+  let lastReopenAttempt = 0;
   while (Date.now() - started < args.uiTextTimeoutMs) {
-    const bodyText = await page.locator('body').innerText().catch(() => '');
-    if (bodyText.includes(args.uiText)) {
+    if (await uiTextPresent(page, args.uiText)) {
       uiTextFound = true;
       break;
     }
@@ -290,13 +429,25 @@ async function main() {
       const cleared = await dismissOverlaysOnce(page);
       if (cleared > 0) log(`cleared ${cleared} overlay(s) while waiting for the UI row text`);
     }
+    // The workspace restore may replace the main view with a blank session even
+    // after a verified click; reopen the requested session instead of idling.
+    if (Date.now() - lastReopenAttempt > 10000) {
+      lastReopenAttempt = Date.now();
+      const main = await mainAreaShowsSession(page);
+      if (!main.opened && args.sessionId) {
+        log('conversation turned blank while waiting; reopening the requested session');
+        await openScenarioSession(page, args.sessionId, args.artifactsDir, true);
+        report.notes.push('reopened the session while waiting for the UI row text');
+      }
+    }
     await page.waitForTimeout(500);
   }
   if (uiTextFound) report.uiTextWaitMs = Date.now() - started;
   report.ui_assert_status = uiTextFound ? 'found' : 'skipped-timeout';
   if (!uiTextFound) {
     warn(`UI text "${args.uiText}" not found within ${args.uiTextTimeoutMs}ms; capturing screenshots anyway and marking ui_assert_status=skipped-timeout (non-fatal)`);
-    report.notes.push('UI text not found; the log-level assertions remain the hard gate');
+    const main = await mainAreaShowsSession(page);
+    report.notes.push(`UI text not found; main text=${JSON.stringify(main.snippet.slice(0, 300))}; the log-level assertions remain the hard gate`);
   } else {
     log(`UI text found: "${args.uiText}"`);
   }
@@ -306,12 +457,41 @@ async function main() {
   report.screenshots.push('verify-chat-zh.png');
 
   if (args.details && uiTextFound) {
-    const target = page.getByText(args.uiText, { exact: false }).first();
-    if (await target.isVisible().catch(() => false)) {
-      await target.click({ timeout: 3000 }).catch(() => {});
+    const row = page.locator('.ctxslim-row, [data-ctxslimmer-row]').first();
+    const rowCount = await row.count().catch(() => 0);
+    if (rowCount > 0) {
+      // The chat list is virtualized: the row may exist in the DOM while being
+      // outside the rendered scroll window, so scroll + activate it directly.
+      await page.evaluate(() => {
+        const rowElement = document.querySelector('.ctxslim-row, [data-ctxslimmer-row]');
+        rowElement?.scrollIntoView({ block: 'center' });
+        const button = rowElement?.querySelector('.ctxslim-button, [data-ctxslimmer-toggle]');
+        if (button instanceof HTMLElement) button.click();
+      }).catch(() => {});
       await page.waitForTimeout(900);
       await page.screenshot({ path: join(args.artifactsDir, 'verify-chat-detail.png'), fullPage: true }).catch(() => {});
       report.screenshots.push('verify-chat-detail.png');
+    } else {
+      report.notes.push('slimmer row not present in the DOM when the detail screenshot was due');
+    }
+  }
+
+  if (args.details && uiTextFound) {
+    // Historical sessions paint tool activity collapsed in the chat view; the
+    // trajectory tab renders the slimmed result itself (elided text), so keep a
+    // second visual record of the event that the DOM assertion verified.
+    try {
+      const trajectoryTab = page.getByRole('tab', { name: /轨迹|Trajectory/i }).first();
+      if (await trajectoryTab.isVisible().catch(() => false)) {
+        await trajectoryTab.click({ timeout: 4000 });
+        await page.waitForTimeout(1400);
+        await page.screenshot({ path: join(args.artifactsDir, 'verify-trajectory.png'), fullPage: true }).catch(() => {});
+        report.screenshots.push('verify-trajectory.png');
+        const chatTab = page.getByRole('tab', { name: /对话|Chat/i }).first();
+        if (await chatTab.isVisible().catch(() => false)) await chatTab.click({ timeout: 3000 }).catch(() => {});
+      }
+    } catch (error) {
+      report.notes.push(`trajectory screenshot skipped: ${String(error).slice(0, 160)}`);
     }
   }
 

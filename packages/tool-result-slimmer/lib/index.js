@@ -70,6 +70,9 @@ const MAX_TASK_CHARS = 1600
  */
 const TERMINAL_FAILURE_STOP_REASONS = new Set(['aborted', 'max-tokens', 'refusal'])
 
+/** Sentinel resolved by the hard-timeout race (identity compared by `kind`). */
+const TIMEOUT_OUTCOME = Object.freeze({ kind: 'timeout' })
+
 /**
  * Estimate the token price of one message without importing dsh packages.
  *
@@ -476,6 +479,8 @@ export class SlimmerHost {
    */
   async runBatch({ agent, session, entries, targets, batch, task, parentSignal }) {
     const childId = `context-slimmer-${randomUUID()}`
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    let timeoutTimer
     const targetSeqs = new Set(targets.map((target) => target.seq))
     const prompt = buildSlimTaskMessage({
       locale: this.config.promptLocale,
@@ -490,40 +495,88 @@ export class SlimmerHost {
         text: target.text,
       })),
     })
-    const timeout = AbortSignal.timeout(this.config.timeoutMs)
-    const signal = parentSignal === undefined || parentSignal === null ? timeout : AbortSignal.any([parentSignal, timeout])
+    // Hard timeout (DEV-12): one controller covers BOTH the publish window
+    // (startActivation) and the run window (activation.result). It aborts the
+    // child activation and races the promise so a wedged subagent can never
+    // block the main agent loop, matching the README/architecture promise that
+    // a timeout is a no-op for the main conversation.
+    const timeoutMs = this.config.timeoutMs
+    const aborter = new AbortController()
+    const timeoutPromise = new Promise((resolve) => {
+      timeoutTimer = setTimeout(() => {
+        try {
+          aborter.abort()
+        } catch {
+          // abort() may throw only when already aborted; ignore
+        }
+        resolve(TIMEOUT_OUTCOME)
+      }, timeoutMs)
+    })
+    const signal = parentSignal === undefined || parentSignal === null ? aborter.signal : AbortSignal.any([parentSignal, aborter.signal])
     const agentOptions = agentOptionsOverride(this.config)
     this.runs.set(childId, batch)
     this.diag('activation-start', { childId, targets: targets.length }, session.id)
     let activation
     try {
-      activation = await this.ctx.subagents.startActivation({
-        provider: this.config.forkProvider,
-        label: 'context-slimmer',
-        childId,
-        delivery: 'caller',
-        signal,
-        request: {
-          prompt,
-          parent: agent,
-          outputSchema: buildPlanJsonSchema(),
-          ...(agentOptions === undefined ? {} : { agentOptions }),
-        },
-      })
-    } catch (error) {
-      this.runs.delete(childId)
-      this.diag('activation-error', { stage: 'start', error: bounded(errorMessage(error), 500) }, session.id)
-      this.ctx.logger?.warn?.(`context-slimmer: subagent start failed: ${errorMessage(error)}`)
-      return STATUS_FAILED
+      const startOutcome = await Promise.race([
+        this.ctx.subagents
+          .startActivation({
+            provider: this.config.forkProvider,
+            label: 'context-slimmer',
+            childId,
+            delivery: 'caller',
+            signal,
+            request: {
+              prompt,
+              parent: agent,
+              outputSchema: buildPlanJsonSchema(),
+              ...(agentOptions === undefined ? {} : { agentOptions }),
+            },
+          })
+          .then((value) => ({ kind: 'activation', value }), (error) => ({ kind: 'reject', error })),
+        timeoutPromise,
+      ])
+      if (startOutcome.kind === TIMEOUT_OUTCOME.kind) {
+        this.diag('activation-error', { stage: 'start-timeout', timeoutMs }, session.id)
+        this.ctx.logger?.warn?.(`context-slimmer: subagent start timed out after ${timeoutMs}ms`)
+        return STATUS_FAILED
+      }
+      if (startOutcome.kind === 'reject') {
+        this.diag('activation-error', { stage: 'start', error: bounded(errorMessage(startOutcome.error), 500) }, session.id)
+        this.ctx.logger?.warn?.(`context-slimmer: subagent start failed: ${errorMessage(startOutcome.error)}`)
+        return STATUS_FAILED
+      }
+      activation = startOutcome.value
+    } finally {
+      // The timer must survive the start window (it also races the result), so
+      // it is only cleared on the paths that never await `activation.result`.
+      if (activation === undefined) clearTimeout(timeoutTimer)
     }
     let result
     try {
-      result = await activation.result
-    } catch (error) {
-      this.diag('activation-error', { stage: 'result', error: bounded(errorMessage(error), 500) }, session.id)
-      this.ctx.logger?.warn?.(`context-slimmer: subagent failed: ${errorMessage(error)}`)
-      return STATUS_FAILED
+      const outcome = await Promise.race([
+        activation.result.then((value) => ({ kind: 'result', value }), (error) => ({ kind: 'reject', error })),
+        timeoutPromise,
+      ])
+      if (outcome.kind === TIMEOUT_OUTCOME.kind) {
+        // Abort first, then dispose: the finally below tears the child down.
+        try {
+          aborter.abort()
+        } catch {
+          // already aborted
+        }
+        this.diag('activation-error', { stage: 'result-timeout', timeoutMs }, session.id)
+        this.ctx.logger?.warn?.(`context-slimmer: subagent result timed out after ${timeoutMs}ms`)
+        return STATUS_FAILED
+      }
+      if (outcome.kind === 'reject') {
+        this.diag('activation-error', { stage: 'result', error: bounded(errorMessage(outcome.error), 500) }, session.id)
+        this.ctx.logger?.warn?.(`context-slimmer: subagent failed: ${errorMessage(outcome.error)}`)
+        return STATUS_FAILED
+      }
+      result = outcome.value
     } finally {
+      clearTimeout(timeoutTimer)
       try {
         await activation.dispose()
       } catch {

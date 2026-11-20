@@ -440,3 +440,34 @@ test('diagnosticsFile records no-op/failure reasons; disabled config writes noth
   await preStep(ctx, session)
   assert.equal(host.diag('trigger', { observedCalls: 0 }), undefined)
 })
+
+test('hard timeout: a never-settling activation.result fails the run without blocking the step', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  let disposed = false
+  // The subagent starts fine but never settles. The host must race the result
+  // against the timeout, abort + dispose the activation, and return failed.
+  ctx.subagents.startActivation = async (spec) => ({
+    childId: spec.childId,
+    messageId: 'message-timeout',
+    result: new Promise(() => {}),
+    dispose: async () => {
+      disposed = true
+    },
+  })
+  const host = new SlimmerHost(ctx, { ...config, timeoutMs: 20 })
+  host.install()
+  await preStep(ctx, session)
+  appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
+  appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
+  const before = session.events.length
+  const startedAt = Date.now()
+  const decision = await preStep(ctx, session)
+  const elapsed = Date.now() - startedAt
+  assert.equal(decision.kind, 'accept', 'main pre-step must still return its decision')
+  assert.equal(elapsed < 2000, true, `step should stop waiting after the timeout, took ${elapsed}ms`)
+  assert.equal(session.events.length, before, 'timed-out run must not append surface events')
+  assert.equal(disposed, true, 'timed-out activation must be disposed')
+  assert.equal(host.runs.size, 0)
+  assert.equal(host.counters.get(session.id).observedCalls, 0, 'timed-out run resets the counter window')
+})

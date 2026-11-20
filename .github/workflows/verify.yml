@@ -106,16 +106,12 @@ jobs:
             npm install --no-audit --no-fund
           fi
 
-      - name: Offline tests (non-fatal while modules are still landing)
+      - name: Offline tests
         run: |
           set -euo pipefail
-          if [ -f package.json ]; then
-            npm run test:core || echo "WARNING: core test suite missing or failing (non-fatal during bring-up)"
-            npm run test:module || echo "WARNING: module test suite missing or failing (non-fatal during bring-up)"
-            npm run test:pack || echo "WARNING: pack dry-run failed (non-fatal during bring-up)"
-          else
-            echo "WARNING: no package.json yet"
-          fi
+          npm run test:core
+          npm run test:module
+          npm run test:pack
 
       - name: Syntax-check CI scripts
         run: |

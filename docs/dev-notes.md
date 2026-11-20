@@ -141,3 +141,11 @@
 **诊断补充（DEV-10 字段）**：`result` 事件记录 `stopReason`（字符串）、`structuredPresent`、`structuredType`、`outputBlockCount`、`textRawLength`，以及 `result.diagnostic` 非空时的前 200 字符（不参与解析）；`no-op`/`activation-error` 的 reason 使用固定枚举：`text-plan-parse-failed`、`no-structure`、`empty-items`、`no-plan:<stopReason>`、`stop:<stopReason>`。
 
 **测试**：`host.test.mjs` 新增「`stopReason:'error'` + `structured` 缺失 + output 文本计划 → 必须落 prune→replace 且末条 summary」正例；新增「`aborted`/`max-tokens`/`refusal` + 有 `structured` 也不落地」负例；原「stopReason error 且无 plan → failed」用例语义保留。
+
+---
+
+## DEV-12 硬超时语义：发布前后都覆盖
+
+**决策**：`config.timeoutMs` 是**硬超时**，覆盖两个阶段：`startActivation` 发布窗口与 `activation.result` 运行窗口。实现：一个 `AbortController` + 一个覆盖全程的 `setTimeout`，两个 await 都 `Promise.race([..., timeoutPromise])`；超时分支先 `aborter.abort()` 取消子激活、diagnostics 记 `activation-error stage:'start-timeout'|'result-timeout'`、`finally` 中 `await dispose()`（catch 吞掉 teardown 错误）后返回 `STATUS_FAILED`，主 Agent 的 `agent/pre-step` 正常返回其 decision（对主会话即 no-op）。`parentSignal` 仍通过 `AbortSignal.any` 合并，turn 取消同样会中止子激活。
+
+**测试**：`host.test.mjs` → “hard timeout: a never-settling activation.result fails the run without blocking the step”（`timeoutMs: 20`，断言 pre-step 正常返回、耗时受控、0 个 surface 事件、activation 被 dispose、计数窗口重置）。
