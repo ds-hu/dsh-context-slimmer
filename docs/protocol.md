@@ -1,8 +1,9 @@
-# 批元数据与替换协议（v1）
+# 批元数据与替换协议（v1.1，v0.2.0 运行模型）
 
 本文件是 `dsh-context-slimmer` 各模块之间、以及模块与 DSH 会话日志之间的**权威协议**。实现：`packages/core/lib/events.js`（schema/校验/读取器）、`packages/core/lib/replace.js`（替换与批次元数据落地）、`packages/tool-result-slimmer/lib/index.js`（宿主编排）、`packages/tool-result-slimmer/lib/client.js`（UI 消费）。测试：`packages/core/test/events.test.mjs`、`replace.test.mjs`。
 
 > 版本：`META_VERSION = 1`；命名空间键 `contextSlimmer`；本文件与实现同步，改字段先改这里。
+> v1.1 说明：v0.2.0 把规划器从 fork 子 Agent 改为 host 直调 `ctx.llm.stream()`，因此一次运行**不会**新增子会话或 `subagent/*` 事件；本协议的数据形状不变（只有 `model` 的语义与失败分类随直调模型更新）。
 
 ---
 
@@ -64,7 +65,7 @@
   "startedAt": 1763600000000,   // epoch ms
   "finishedAt": 1763600012345,  // epoch ms，>= startedAt
   "trigger": {
-    "everyNToolCalls": 8,       // 本次生效的配置值
+    "everyNToolCalls": 12,      // 本次生效的配置值
     "minChars": 24000,
     "observedCalls": 9,         // 触发窗口内观测到的 tool/result 数
     "observedChars": 31200      // 触发窗口内累计字符数
@@ -140,11 +141,12 @@ seq S+3   tool/result       { ...原 data, message:{…content:[trim文本]} }
 | `status` | 何时出现 | 是否落盘 summary | 主会话影响 |
 | :-- | :-- | :-- | :-- |
 | `applied` | 计划合法且 ≥1 项落地 | 是（末条 prune） | 目标结果被替换 |
-| `no-op` | 子 Agent 返回空计划/无计划 | 否 | 无 |
-| `rejected` | `validatePlan` 拒绝整单（越界/重复/超长/缺前缀/伪造证据等） | 否 | 无 |
-| `failed` | 超时、子 Agent 错误、启动失败、append 异常 | 否 | 已落地部分保留（原子性只在校验阶段） |
+| `no-op` | 规划器返回空计划/无计划/无法解析 | 否 | 无 |
+| `rejected` | `validatePlan` 拒绝整单（越界/重复/超长/缺前缀/伪造证据/策略不允许等） | 否 | 无 |
+| `failed` | 规划器超时/流错误/截断（`planner-truncated`）、append 异常 | 否 | 已落地部分保留（原子性只在校验阶段） |
 
 - 四种状态都**不向主 Agent 抛异常**，只写 debug/warn 日志（日志只含计数，不含工具原文）。
+- v0.2.0 直调规划器的失败诊断（`diagnosticsFile` 开启时）：`finish=max-tokens` 且本次显式设了 `model.maxOutputTokens` → 自动不带 cap 重试一次；仍失败写 `planner-truncated`（带 finishReason/usage/durationMs/retried）并整体 no-op。
 - 计数器窗口在四种结果后都重置，避免失败后每一步重试打爆主循环。
 - **UI 扩展降级**：首次发现“带 `contextSlimmer` 的 prune append 抛错”时，进程内实例缓存 `extensionSupported = false`；本批剩余项与之后所有批次只写官方三字段，替换照常落地，仅无 UI 行。实现：`replace.applyPlan` 的 `batch.attachMeta/attachMeta=false` + `batch.degraded`。
 

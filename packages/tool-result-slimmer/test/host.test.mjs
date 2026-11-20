@@ -4,470 +4,398 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import {
-  Config,
-  ConfigError,
-  SlimmerHost,
-  estimateMessageTokens,
-  extractPlan,
-  extractPlanFromText,
-  extractTask,
-  buildRecent,
-} from '../lib/index.js'
-import { readSurfaceEntries } from '@ds-hu/dsh-context-slimmer-core/replace'
-import { readSlimMetaFromEvent } from '@ds-hu/dsh-context-slimmer-core/events'
 import { createFakeSession } from '../../core/test/helpers/fake-session.mjs'
+import { buildPlannerInstruction } from '../../core/lib/prompt.js'
+import { readSlimMetaFromEvent } from '../../core/lib/events.js'
+import { SlimmerHost, estimateMessageTokens, extractPlanFromText, parsePlannerText } from '../lib/index.js'
 
-/**
- * Fake Cordis context: records listeners, a fake tool registry and a fake
- * subagent service whose activation is scripted per test.
- */
+/** Resolved-config double; tests override individual fields. */
+function hostConfig(overrides = {}) {
+  return {
+    enabled: true,
+    everyNToolCalls: 1,
+    minChars: 1,
+    protectRecent: 0,
+    maxTargets: 4,
+    triggerOnErrorOnly: false,
+    minTargetChars: 0,
+    timeoutMs: 500,
+    policy: 'conservative',
+    includeSubagents: true,
+    promptLocale: 'zh',
+    diagnosticsFile: '',
+    model: { provider: 'p', model: 'm', reasoningEffort: '', maxOutputTokens: 0 },
+    ...overrides,
+  }
+}
+
+/** Minimal Cordis ctx double with one LLM stream factory. */
 function createFakeCtx() {
+  const handlers = new Map()
   const ctx = {
-    logger: { info: () => {}, debug: () => {}, warn: () => {} },
-    handlers: new Map(),
-    disposers: 0,
-    restricted: undefined,
-    tokenMeter: undefined,
-    activationSpecs: [],
-    on(name, handler) {
-      const list = ctx.handlers.get(name) ?? []
-      list.push(handler)
-      ctx.handlers.set(name, list)
+    logger: { info() {}, warn() {}, debug() {} },
+    on(event, handler) {
+      if (!handlers.has(event)) handlers.set(event, [])
+      handlers.get(event).push(handler)
       return () => {
-        ctx.disposers += 1
+        const list = handlers.get(event) ?? []
+        const index = list.indexOf(handler)
+        if (index >= 0) list.splice(index, 1)
       }
     },
-    effect(callback) {
-      return callback()
+    effect() {
+      return () => {}
     },
-    get(name) {
-      return name === 'tokenMeter' ? ctx.tokenMeter : undefined
+    get() {
+      return undefined
     },
-    tools: {
-      definitions: () => [{ name: 'bash' }, { name: 'read_file' }],
-      restrict: (options) => {
-        ctx.restricted = options
+    llm: {
+      calls: [],
+      /** @type {((options: object, callIndex: number) => AsyncGenerator) | null} */
+      streamFactory: null,
+      stream(options) {
+        ctx.llm.calls.push(options)
+        if (ctx.llm.streamFactory === null) throw new Error('no stream factory configured')
+        return ctx.llm.streamFactory(options, ctx.llm.calls.length - 1)
       },
     },
-    subagents: {
-      startActivation: async (spec) => {
-        ctx.activationSpecs.push(spec)
-        for (const handler of ctx.handlers.get('agent/created') ?? []) {
-          await handler({ agent: { id: spec.childId, ctx: { tools: ctx.tools } } })
-        }
-        const result = typeof ctx.nextResult === 'function' ? ctx.nextResult(spec) : (ctx.nextResult ?? { stopReason: 'completed', output: [] })
-        return { childId: spec.childId, messageId: 'message-1', result: Promise.resolve(result), dispose: async () => {} }
-      },
+    emitSessionEvent(session, event) {
+      for (const handler of handlers.get('session/event') ?? []) handler(session, event)
+    },
+    emitAgentCreated(payload) {
+      for (const handler of handlers.get('agent/created') ?? []) handler(payload)
+    },
+    async preStep(payload) {
+      const handler = (handlers.get('agent/pre-step') ?? [])[0]
+      assert.equal(typeof handler, 'function', 'agent/pre-step listener must be installed')
+      return handler(payload, async () => ({ kind: 'accept' }))
     },
   }
   return ctx
 }
 
-const config = {
-  enabled: true,
-  everyNToolCalls: 2,
-  minChars: 0,
-  protectRecent: 0,
-  maxTargets: 12,
-  triggerOnErrorOnly: false,
-  minTargetChars: 1,
-  timeoutMs: 5000,
-  forkProvider: 'fork',
-  promptLocale: 'auto',
-  model: { provider: 'inherit', model: 'inherit', reasoningEffort: 'inherit', maxOutputTokens: 64 },
-}
-
-function emit(ctx, name, ...args) {
-  return (ctx.handlers.get(name) ?? []).map((handler) => handler(...args))
-}
-
-async function preStep(ctx, session, extra = {}) {
-  const payload = {
-    agent: { id: 'root-agent', session },
+function preStepPayload(session, options = {}) {
+  return {
+    agent: { id: options.agentId ?? 'agent-1', session, options: options.agentOptions ?? { provider: 'p', model: 'm' } },
     messages: [{ role: 'user', content: [{ type: 'text', text: 'fix the failing test' }] }],
-    modelSelection: { provider: 'test-provider', model: 'test-model' },
-    signal: undefined,
-    ...extra,
+    signal: options.signal,
   }
-  let decision = { kind: 'accept' }
-  for (const handler of ctx.handlers.get('agent/pre-step') ?? []) {
-    decision = await handler(payload, async () => decision)
-  }
-  return decision
 }
 
-function appendObserved(ctx, session, callId, toolName, text, options = {}) {
-  const event = session.appendToolResult(callId, toolName, text, options)
-  emit(ctx, 'session/event', session, event)
+function liveResult(ctx, session, callId, toolName, text, options = {}) {
+  const event = session.appendToolResult(callId, toolName, text, { isError: options.isError === true })
+  ctx.emitSessionEvent(session, event)
   return event
 }
 
-test('module exports the row name, required services and Config', () => {
-  assert.equal(Config({}).everyNToolCalls, 8)
-  assert.equal(typeof SlimmerHost, 'function')
-})
-
-test('baseline first pre-step never triggers; the next threshold does', async () => {
-  const ctx = createFakeCtx()
-  const session = createFakeSession()
-  ctx.nextResult = { stopReason: 'completed', output: [], structured: { summary: 's', items: [] } }
-  const host = new SlimmerHost(ctx, config)
-  host.install()
-  await preStep(ctx, session)
-  assert.equal(ctx.activationSpecs.length, 0, 'baseline must not trigger')
-  assert.deepEqual(ctx.restricted, undefined)
-
-  appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
-  appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
-  const decision = await preStep(ctx, session)
-  assert.equal(decision.kind, 'accept')
-  assert.equal(ctx.activationSpecs.length, 1)
-  const spec = ctx.activationSpecs[0]
-  assert.equal(spec.provider, 'fork')
-  assert.equal(spec.delivery, 'caller')
-  assert.equal(spec.request.parent.id, 'root-agent')
-  assert.equal(spec.request.outputSchema.type, 'object')
-  assert.equal(spec.request.prompt.length, 1)
-  assert.match(spec.request.prompt[0].text, /\[CANDIDATES\]/)
-  assert.match(spec.request.prompt[0].text, /\[#0\] tool=/)
-  assert.match(spec.request.prompt[0].text, /fix the failing test/)
-  // The child is restricted before its first request.
-  assert.deepEqual(ctx.restricted, { deny: ['bash', 'read_file'] })
-  // The run resets the counter window.
-  assert.equal(host.counters.get(session.id).observedCalls, 0)
-  assert.equal(host.runs.size, 0)
-})
-
-test('applied plan lands prune -> replace pairs with summary metadata on the last prune', async () => {
-  const ctx = createFakeCtx()
-  const session = createFakeSession()
-  ctx.nextResult = {
-    stopReason: 'completed',
-    output: [],
-    structured: {
-      summary: '清理',
-      items: [
-        { index: 1, op: 'trim', text: '[elided by context-slimmer] bash; original 2000 chars; re-run', reason: 'bulk' },
-        { index: 0, op: 'drop', reason: '无关' },
-      ],
-    },
+/** One-shot generator yielding complete text and a finish reason. */
+function textPlanStream(plan, options = {}) {
+  return async function* () {
+    if (options.throwError !== undefined) throw options.throwError
+    yield { type: 'text-delta', index: 0, text: typeof plan === 'string' ? plan : JSON.stringify(plan) }
+    yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 20 } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
   }
-  const host = new SlimmerHost(ctx, config)
-  host.install()
-  await preStep(ctx, session)
-  appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
-  appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
-  await preStep(ctx, session)
-
-  const appended = session.events.slice(4)
-  assert.deepEqual(appended.map((event) => event.type), ['compaction/prune', 'tool/result', 'compaction/prune', 'tool/result'])
-  const first = readSlimMetaFromEvent(appended[0])
-  const last = readSlimMetaFromEvent(appended[2])
-  assert.equal(first.role, 'item')
-  assert.equal(last.role, 'summary')
-  assert.equal(last.status, 'applied')
-  assert.equal(last.items.length, 2)
-  assert.deepEqual(last.model, { provider: 'test-provider', model: 'test-model', inherited: true })
-  assert.deepEqual(last.trigger, { everyNToolCalls: 2, minChars: 0, observedCalls: 2, observedChars: 3000 })
-  assert.equal(appended[1].surfaceOp.op, 'replace')
-  assert.equal(appended[3].surfaceOp.op, 'replace')
-  // Replacement messages keep their tool pairing and only change content.
-  assert.equal(appended[1].data.message.toolCallId, 'call-2')
-  assert.equal(appended[3].data.message.toolCallId, 'call-1')
-  assert.equal(testTrim(appended[1].data.message.content[0].text), true)
-
-  // No run is triggered again on the next step until the window fills.
-  await preStep(ctx, session)
-  assert.equal(ctx.activationSpecs.length, 1)
-})
-
-function testTrim(text) {
-  return typeof text === 'string' && text.startsWith('[elided by context-slimmer]')
 }
 
-test('no-op / rejected / failed plans never touch the surface', async () => {
-  for (const [name, nextResult, expectedSpecs] of [
-    ['no plan', { stopReason: 'completed', output: [] }, 1],
-    ['empty plan', { stopReason: 'completed', output: [], structured: { summary: 's', items: [] } }, 1],
-    ['invalid plan', { stopReason: 'completed', output: [], structured: { summary: 's', items: [{ index: 9, op: 'drop' }] } }, 1],
-    ['failed child', { stopReason: 'error', output: [] }, 1],
-  ]) {
-    const ctx = createFakeCtx()
-    const session = createFakeSession()
-    ctx.nextResult = nextResult
-    const host = new SlimmerHost(ctx, config)
-    host.install()
-    await preStep(ctx, session)
-    appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
-    appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
-    const before = session.events.length
-    const decision = await preStep(ctx, session)
-    assert.equal(decision.kind, 'accept', name)
-    assert.equal(session.events.length, before, `${name} must not append events`)
-    assert.equal(ctx.activationSpecs.length, expectedSpecs, name)
-    assert.equal(host.counters.get(session.id).observedCalls, 0, `${name} resets the window`)
+/** Generator that emits only reasoning and truncates at the token cap. */
+function truncatedStream() {
+  return async function* () {
+    yield { type: 'reasoning-delta', index: 0, text: 'thinking...' }
+    yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 2048 } }
+    yield { type: 'finish', reason: { kind: 'max-tokens' } }
   }
-})
+}
 
-test('text plan is accepted when outputSchema was not submitted (stopReason rewritten to error)', async () => {
+/** Generator that never settles (hard-timeout test). */
+function hungStream() {
+  return async function* () {
+    await new Promise(() => {})
+  }
+}
+
+function duplicateSetup(ctx, session, options = {}) {
+  const body = `large duplicate body ${'x'.repeat(300)}`
+  liveResult(ctx, session, 'call-0', 'read_file', body)
+  liveResult(ctx, session, 'call-1', 'read_file', body)
+  return body
+}
+
+test('baseline pre-step installs a counter without calling the planner', async () => {
   const ctx = createFakeCtx()
   const session = createFakeSession()
-  // Managed fork + outputSchema: a child that answers in plain assistant text
-  // (never calls structured_output) is reported as stopReason 'error' with no
-  // `structured` field, but `output` still carries the final text plan.
-  ctx.nextResult = {
-    stopReason: 'error',
-    output: [
-      { type: 'text', text: 'Here is the plan:' },
-      { type: 'text', text: '```json\n{"summary":"清理","items":[{"index":1,"op":"trim","text":"[elided by context-slimmer] read_file; original 2000 chars; re-run to restore","reason":"bulk"},{"index":0,"op":"drop","reason":"无关"}]}\n```' },
-    ],
-    diagnostic: 'output schema not satisfied',
-  }
-  const host = new SlimmerHost(ctx, config)
+  const host = new SlimmerHost(ctx, hostConfig())
   host.install()
-  await preStep(ctx, session)
-  appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
-  appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
+  await ctx.preStep(preStepPayload(session))
+  assert.equal(ctx.llm.calls.length, 0)
+  assert.equal(host.counters.get(session.id).observedCalls, 0)
+})
+
+test('AND trigger: calls-only or chars-only does not fire; both fire and apply a duplicate drop', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  const host = new SlimmerHost(ctx, hostConfig({ everyNToolCalls: 2, minChars: 200 }))
+  host.install()
+  await ctx.preStep(preStepPayload(session))
+
+  // One result, far above minChars: the count condition still fails.
+  liveResult(ctx, session, 'call-0', 'read_file', 'x'.repeat(400))
+  await ctx.preStep(preStepPayload(session))
+  assert.equal(ctx.llm.calls.length, 0)
+
+  // Second small result: now both conditions are met.
+  ctx.llm.streamFactory = textPlanStream({
+    summary: '去重',
+    items: [{ index: 1, op: 'drop', evidence: { kind: 'duplicate' }, duplicateOf: 'call-0', reason: '重复' }],
+  })
+  liveResult(ctx, session, 'call-1', 'read_file', 'x'.repeat(400))
+  await ctx.preStep(preStepPayload(session))
+  assert.equal(ctx.llm.calls.length, 1)
+
+  const appended = session.events.slice(-2)
+  assert.deepEqual(appended.map((event) => event.type), ['compaction/prune', 'tool/result'])
+  const stub = appended[1].data.message.content[0].text
+  assert.equal(stub.includes('duplicate of call-0 (kept above)'), true)
+  assert.equal(stub.includes('do not re-read'), true)
+  assert.equal(stub.includes('re-fetch'), false)
+  assert.equal(readSlimMetaFromEvent(appended[0]).role, 'summary')
+})
+
+test('planner request: derived messages + instruction, inherit route, no maxTokens/reasoningEffort by default', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession({ requestHeader: { config: { provider: 'h-p', model: 'h-m', reasoningEffort: 'max' } } })
+  session.appendToolResult('call-0', 'bash', 'old result')
+  const host = new SlimmerHost(ctx, hostConfig({ model: { provider: '', model: '', reasoningEffort: '', maxOutputTokens: 0 } }))
+  host.install()
+  await ctx.preStep(preStepPayload(session))
+  liveResult(ctx, session, 'call-1', 'bash', 'the chosen result text')
+  ctx.llm.streamFactory = textPlanStream({ summary: '无改动', items: [] })
+  await ctx.preStep(preStepPayload(session))
+
+  assert.equal(ctx.llm.calls.length, 1)
+  const options = ctx.llm.calls[0]
+  assert.equal(options.provider, 'h-p')
+  assert.equal(options.model, 'h-m')
+  assert.equal(options.reasoningEffort, 'max', 'inherit copies the main route effort (thinking stays on)')
+  assert.equal('maxTokens' in options, false, 'maxOutputTokens=0 must omit maxTokens')
+  assert.equal('purpose' in options, false, 'planner must not claim the compaction purpose')
+  assert.equal('tools' in options, false, 'planner request stays tool-less')
+  assert.equal(options.sessionId, session.id)
+  assert.equal(typeof options.signal?.aborted, 'boolean')
+  assert.equal(options.messages.length >= 1, true)
+  const last = options.messages.at(-1)
+  assert.equal(last.role, 'user')
+  const instruction = last.content[0].text
+  assert.equal(instruction.includes('[CANDIDATES]'), true)
+  assert.equal(instruction.includes('callId=call-1'), true)
+  assert.equal(instruction.includes('唯一的长文本读取结果'), true)
+  // An explicit effort value is forwarded verbatim.
+  const ctxExpl = createFakeCtx()
+  const sessionExpl = createFakeSession()
+  const hostExpl = new SlimmerHost(ctxExpl, hostConfig({ model: { provider: 'p', model: 'm', reasoningEffort: 'max', maxOutputTokens: 0 } }))
+  hostExpl.install()
+  await ctxExpl.preStep(preStepPayload(sessionExpl))
+  liveResult(ctxExpl, sessionExpl, 'call-0', 'bash', 'explicit effort output')
+  ctxExpl.llm.streamFactory = textPlanStream({ summary: '无改动', items: [] })
+  await ctxExpl.preStep(preStepPayload(sessionExpl))
+  assert.equal(ctxExpl.llm.calls[0].reasoningEffort, 'max')
+})
+
+test('maxOutputTokens > 0 is forwarded, and an unchanged plan is a no-op', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  const host = new SlimmerHost(ctx, hostConfig({ model: { provider: 'p', model: 'm', reasoningEffort: '', maxOutputTokens: 2048 } }))
+  host.install()
+  await ctx.preStep(preStepPayload(session))
+  liveResult(ctx, session, 'call-0', 'bash', 'big output')
+  ctx.llm.streamFactory = textPlanStream({ summary: '无改动', items: [] })
+  await ctx.preStep(preStepPayload(session))
+  assert.equal(ctx.llm.calls[0].maxTokens, 2048)
+  assert.equal(session.events.filter((event) => event.type === 'compaction/prune').length, 0)
+})
+
+test('structured_output tool-call compatibility still applies a plan', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  const host = new SlimmerHost(ctx, hostConfig())
+  host.install()
+  await ctx.preStep(preStepPayload(session))
+  liveResult(ctx, session, 'call-0', 'read_file', 'A'.repeat(500))
+  liveResult(ctx, session, 'call-1', 'read_file', 'A'.repeat(500))
+  const plan = {
+    summary: '去重',
+    items: [{ index: 1, op: 'drop', evidence: { kind: 'duplicate' }, duplicateOf: 'call-0', reason: '重复' }],
+  }
+  ctx.llm.streamFactory = async function* () {
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 't1', name: 'structured_output', arguments: JSON.stringify(plan) } }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  }
+  await ctx.preStep(preStepPayload(session))
+  assert.equal(session.events.filter((event) => event.type === 'compaction/prune').length, 1)
+})
+
+test('conservative policy rejects trim plans and never touches the surface', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  const host = new SlimmerHost(ctx, hostConfig())
+  host.install()
+  await ctx.preStep(preStepPayload(session))
+  liveResult(ctx, session, 'call-0', 'bash', 'bulk output '.repeat(100))
+  ctx.llm.streamFactory = textPlanStream({
+    summary: '修剪',
+    items: [{ index: 0, op: 'trim', text: '[elided by context-slimmer] kept', reason: 'bulk' }],
+  })
   const before = session.events.length
-  await preStep(ctx, session)
-  assert.equal(session.events.length, before + 4, 'text-plan degradation must still land prune->replace pairs')
-  assert.deepEqual(session.events.slice(before).map((event) => event.type), ['compaction/prune', 'tool/result', 'compaction/prune', 'tool/result'])
-  assert.equal(readSlimMetaFromEvent(session.events[before + 2]).role, 'summary')
+  await ctx.preStep(preStepPayload(session))
+  assert.equal(session.events.length, before, 'a rejected plan must not append events')
 })
 
-test('aborted/max-tokens/refusal never mutate the surface even with a plan', async () => {
-  for (const stopReason of ['aborted', 'max-tokens', 'refusal']) {
+test('includeSubagents controls whether subagent sessions are processed', async () => {
+  for (const includeSubagents of [true, false]) {
+    const ctx = createFakeCtx()
+    const session = createFakeSession({ origin: 'subagent' })
+    const host = new SlimmerHost(ctx, hostConfig({ includeSubagents }))
+    host.install()
+    await ctx.preStep(preStepPayload(session))
+    liveResult(ctx, session, 'call-0', 'read_file', 'B'.repeat(500))
+    liveResult(ctx, session, 'call-1', 'read_file', 'B'.repeat(500))
+    ctx.llm.streamFactory = textPlanStream({
+      summary: '去重',
+      items: [{ index: 1, op: 'drop', evidence: { kind: 'duplicate' }, duplicateOf: 'call-0', reason: '重复' }],
+    })
+    await ctx.preStep(preStepPayload(session))
+    assert.equal(ctx.llm.calls.length, includeSubagents ? 1 : 0)
+    assert.equal(session.events.filter((event) => event.type === 'compaction/prune').length, includeSubagents ? 1 : 0)
+  }
+})
+
+test('no resolvable model is a silent no-op', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  const host = new SlimmerHost(ctx, hostConfig({ model: { provider: '', model: '', reasoningEffort: '', maxOutputTokens: 0 } }))
+  host.install()
+  await ctx.preStep(preStepPayload(session, { agentOptions: {} }))
+  liveResult(ctx, session, 'call-0', 'bash', 'output '.repeat(50))
+  const before = session.events.length
+  await ctx.preStep(preStepPayload(session, { agentOptions: {} }))
+  assert.equal(ctx.llm.calls.length, 0)
+  assert.equal(session.events.length, before)
+})
+
+test('transient first truncation retries without maxTokens and applies the plan', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  const host = new SlimmerHost(ctx, hostConfig({ model: { provider: 'p', model: 'm', reasoningEffort: '', maxOutputTokens: 2048 } }))
+  host.install()
+  await ctx.preStep(preStepPayload(session))
+  liveResult(ctx, session, 'call-0', 'read_file', 'C'.repeat(500))
+  liveResult(ctx, session, 'call-1', 'read_file', 'C'.repeat(500))
+  ctx.llm.streamFactory = (options, callIndex) => {
+    if (callIndex === 0) return truncatedStream()()
+    return textPlanStream({
+      summary: '去重',
+      items: [{ index: 1, op: 'drop', evidence: { kind: 'duplicate' }, duplicateOf: 'call-0', reason: '重复' }],
+    })()
+  }
+  await ctx.preStep(preStepPayload(session))
+  assert.equal(ctx.llm.calls.length, 2)
+  assert.equal(ctx.llm.calls[0].maxTokens, 2048)
+  assert.equal('maxTokens' in ctx.llm.calls[1], false, 'retry must omit the cap')
+  assert.equal(session.events.filter((event) => event.type === 'compaction/prune').length, 1)
+})
+
+test('persistent truncation fails the run without touching the surface and records diagnostics', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'slimmer-trunc-'))
+  const diagnosticsFile = path.join(directory, 'diagnostics.jsonl')
+  try {
     const ctx = createFakeCtx()
     const session = createFakeSession()
-    ctx.nextResult = {
-      stopReason,
-      output: [],
-      structured: { summary: 's', items: [{ index: 0, op: 'drop' }] },
-    }
-    const host = new SlimmerHost(ctx, config)
+    const host = new SlimmerHost(ctx, hostConfig({ diagnosticsFile, model: { provider: 'p', model: 'm', reasoningEffort: '', maxOutputTokens: 2048 } }))
     host.install()
-    await preStep(ctx, session)
-    appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
-    appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
+    await ctx.preStep(preStepPayload(session))
+    liveResult(ctx, session, 'call-0', 'bash', 'D'.repeat(500))
+    ctx.llm.streamFactory = () => truncatedStream()()
     const before = session.events.length
-    await preStep(ctx, session)
-    assert.equal(session.events.length, before, `${stopReason} must not append events`)
-  }
-})
-
-test('structured output wins; assistant JSON text is the fallback', () => {
-  assert.deepEqual(extractPlan({ structured: { summary: 's', items: [] }, output: [] }), { summary: 's', items: [] })
-  const fromText = extractPlan({
-    output: [{ type: 'text', text: 'prefix\n```json\n{"summary":"s","items":[]}\n```\nafter' }],
-  })
-  assert.deepEqual(fromText, { summary: 's', items: [] })
-  assert.deepEqual(extractPlanFromText('no json here'), null)
-  assert.deepEqual(extractPlanFromText('{"a":1} trailing'), { a: 1 })
-  assert.equal(extractPlan({}), null)
-  assert.equal(extractPlan(null), null)
-})
-
-test('task extraction and recent rendering never leak tool text into the task block', () => {
-  const messages = [
-    { role: 'user', content: [{ type: 'text', text: 'first' }] },
-    { role: 'assistant', content: [{ type: 'text', text: 'working' }] },
-    { role: 'user', content: [{ type: 'text', text: 'second request' }] },
-  ]
-  assert.equal(extractTask(messages), 'second request')
-  assert.equal(extractTask(undefined), '（未提供）')
-  assert.equal(extractTask([{ role: 'user', content: [] }]), '（未提供）')
-  assert.equal(extractTask([{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(5000) }] }]).length > 1600, true)
-
-  const session = createFakeSession()
-  session.appendToolResult('call-1', 'bash', 'a'.repeat(100))
-  session.appendToolResult('call-2', 'read_file', 'b'.repeat(200))
-  const entries = readSurfaceEntries(session)
-  const recent = buildRecent(entries, new Set([entries[1].seq]), 4)
-  assert.deepEqual(recent, [{ index: 0, tool: 'read_file', isError: false, chars: 200 }])
-})
-
-test('prune-extension rejection degrades for the rest of the instance', async () => {
-  const ctx = createFakeCtx()
-  const session = createFakeSession({ rejectPruneExtension: true })
-  ctx.nextResult = (spec) => ({
-    stopReason: 'completed',
-    output: [],
-    structured: { summary: 's', items: [{ index: 0, op: 'drop' }] },
-  })
-  const host = new SlimmerHost(ctx, config)
-  host.install()
-  await preStep(ctx, session)
-  appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
-  appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
-  await preStep(ctx, session)
-  assert.equal(host.extensionSupported, false)
-  const replacement = session.events.at(-1)
-  assert.equal(replacement.type, 'tool/result')
-  assert.equal(replacement.surfaceOp.op, 'replace')
-
-  // Second run must not even try the additive field.
-  session.rejectPruneExtension = false
-  appendObserved(ctx, session, 'call-3', 'bash', 'c'.repeat(1000))
-  appendObserved(ctx, session, 'call-4', 'read_file', 'd'.repeat(2000))
-  await preStep(ctx, session)
-  const prunes = session.events.filter((event) => event.type === 'compaction/prune')
-  assert.equal(prunes.length, 2)
-  assert.equal(prunes[1].data.contextSlimmer, undefined)
-})
-
-test('pre-execute guard denies every child tool except structured_output', async () => {
-  const ctx = createFakeCtx()
-  const session = createFakeSession()
-  const host = new SlimmerHost(ctx, config)
-  host.install()
-  host.runs.set('child-1', { batchId: 'b' })
-  const guards = ctx.handlers.get('tools/pre-execute')
-  assert.equal(guards.length, 1)
-  assert.deepEqual(
-    await guards[0]({ name: 'bash', agent: { id: 'child-1' } }, async () => ({ kind: 'allow' })),
-    { kind: 'deny', reason: 'context-slimmer child may only submit its structured plan' },
-  )
-  assert.deepEqual(await guards[0]({ name: 'structured_output', agent: { id: 'child-1' } }, async () => ({ kind: 'allow' })), { kind: 'allow' })
-  assert.deepEqual(await guards[0]({ name: 'bash', agent: { id: 'root-agent' } }, async () => ({ kind: 'allow' })), { kind: 'allow' })
-})
-
-test('estimateMessageTokens uses the token meter, then the 4-chars fallback', () => {
-  const message = { role: 'tool', content: [{ type: 'text', text: 'a'.repeat(400) }] }
-  assert.equal(estimateMessageTokens(undefined, message), 100)
-  assert.equal(estimateMessageTokens({ estimateMessage: () => 42 }, message), 42)
-  assert.equal(estimateMessageTokens({ estimateMessage: () => { throw new Error('boom') } }, message), 100)
-  assert.equal(estimateMessageTokens({ estimateMessage: () => Number.NaN }, message), 100)
-})
-
-test('config errors surface as ConfigError from the row schema', () => {
-  assert.equal(typeof ConfigError, 'function')
-})
-
-
-test('diagnosticsFile writes sanitized JSONL for a successful run', async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'slimmer-diag-'))
-  const diagnosticsFile = path.join(directory, 'diagnostics.jsonl')
-  try {
-    const ctx = createFakeCtx()
-    const session = createFakeSession()
-    ctx.nextResult = {
-      stopReason: 'completed',
-      output: [],
-      structured: {
-        summary: '清理',
-        items: [
-          { index: 1, op: 'trim', text: '[elided by context-slimmer] read_file; original 2000 chars; re-run to restore', reason: 'bulk' },
-          { index: 0, op: 'drop', reason: '无关' },
-        ],
-      },
-    }
-    const host = new SlimmerHost(ctx, { ...config, diagnosticsFile })
-    host.install()
-    await preStep(ctx, session)
-    assert.equal(fs.existsSync(diagnosticsFile), false, 'baseline pre-step writes nothing')
-    appendObserved(ctx, session, 'call-1', 'bash', 'SECRET_TOOL_TEXT\n'.repeat(100))
-    appendObserved(ctx, session, 'call-2', 'read_file', 'SECRET_TOOL_TEXT\n'.repeat(200))
-    await preStep(ctx, session)
-    assert.equal(fs.existsSync(diagnosticsFile), true)
-    const raw = fs.readFileSync(diagnosticsFile, 'utf8')
-    const records = raw.trim().split('\n').map((line) => JSON.parse(line))
-    assert.equal(records.length >= 6, true, `expected several diagnostics lines, got ${records.length}`)
-    const kinds = records.map((record) => record.kind)
-    for (const kind of ['trigger', 'activation-start', 'result', 'plan', 'validate', 'apply']) {
-      assert.equal(kinds.includes(kind), true, `missing diagnostic kind ${kind}`)
-    }
-    assert.equal(records.every((record) => typeof record.ts === 'number' && record.ts > 0), true)
-    assert.equal(records.every((record) => record.sessionId === session.id), true)
-    const trigger = records.find((record) => record.kind === 'trigger')
-    assert.deepEqual(trigger.targets.map((target) => target.tool), ['bash', 'read_file'])
-    const plan = records.find((record) => record.kind === 'plan')
-    assert.equal(typeof plan.plan, 'string')
-    assert.equal(plan.plan.length <= 4000, true)
-    const validate = records.find((record) => record.kind === 'validate')
-    assert.equal(validate.ok, true)
-    const apply = records.find((record) => record.kind === 'apply')
-    assert.equal(apply.items, 2)
-    assert.equal(apply.metaLanded, true)
-    assert.equal(apply.degraded, false)
-    // No full tool-result text ever reaches the diagnostics file.
-    assert.equal(raw.includes('SECRET_TOOL_TEXT'.repeat(20)), false)
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true })
-  }
-})
-
-test('diagnosticsFile records no-op/failure reasons; disabled config writes nothing', async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'slimmer-diag-'))
-  const diagnosticsFile = path.join(directory, 'diagnostics.jsonl')
-  try {
-    const ctx = createFakeCtx()
-    const session = createFakeSession()
-    ctx.nextResult = { stopReason: 'completed', output: [{ type: 'text', text: 'plain text, no json' }] }
-    const host = new SlimmerHost(ctx, { ...config, diagnosticsFile })
-    host.install()
-    await preStep(ctx, session)
-    appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
-    appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
-    await preStep(ctx, session)
+    await ctx.preStep(preStepPayload(session))
+    assert.equal(ctx.llm.calls.length, 2)
+    assert.equal(session.events.length, before)
     const records = fs.readFileSync(diagnosticsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
-    const noop = records.find((record) => record.kind === 'no-op')
-    assert.equal(noop.reason, 'text-plan-parse-failed')
-    assert.equal(records.some((record) => record.kind === 'apply'), false)
-
-    // A plan that validatePlan rejects is recorded with its stable code.
-    ctx.nextResult = { stopReason: 'completed', output: [], structured: { summary: 's', items: [{ index: 9, op: 'drop' }] } }
-    appendObserved(ctx, session, 'call-3', 'bash', 'c'.repeat(1000))
-    appendObserved(ctx, session, 'call-4', 'read_file', 'd'.repeat(2000))
-    await preStep(ctx, session)
-    const all = fs.readFileSync(diagnosticsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
-    const rejected = all.find((record) => record.kind === 'validate' && record.ok === false)
-    assert.equal(rejected.code, 'item-index-out-of-range')
-    assert.equal(typeof rejected.message, 'string')
+    const truncated = records.find((record) => record.kind === 'planner-truncated')
+    assert.equal(truncated.finishReason, 'max-tokens')
+    assert.equal(truncated.retried, true)
+    assert.equal(truncated.usage.completionTokens, 2048)
+    assert.equal(typeof truncated.durationMs, 'number')
+    const retry = records.find((record) => record.kind === 'llm-truncation-retry')
+    assert.equal(retry.maxTokens, 2048)
   } finally {
     fs.rmSync(directory, { recursive: true, force: true })
   }
-
-  // Default configuration (empty diagnosticsFile) never creates a file.
-  const ctx = createFakeCtx()
-  const session = createFakeSession()
-  ctx.nextResult = { stopReason: 'completed', output: [], structured: { summary: 's', items: [] } }
-  const host = new SlimmerHost(ctx, { ...config })
-  host.install()
-  await preStep(ctx, session)
-  appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
-  appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
-  await preStep(ctx, session)
-  assert.equal(host.diag('trigger', { observedCalls: 0 }), undefined)
 })
 
-test('hard timeout: a never-settling activation.result fails the run without blocking the step', async () => {
+test('hard timeout and stream errors are silent no-ops', async () => {
   const ctx = createFakeCtx()
   const session = createFakeSession()
-  let disposed = false
-  // The subagent starts fine but never settles. The host must race the result
-  // against the timeout, abort + dispose the activation, and return failed.
-  ctx.subagents.startActivation = async (spec) => ({
-    childId: spec.childId,
-    messageId: 'message-timeout',
-    result: new Promise(() => {}),
-    dispose: async () => {
-      disposed = true
-    },
-  })
-  const host = new SlimmerHost(ctx, { ...config, timeoutMs: 20 })
+  const host = new SlimmerHost(ctx, hostConfig({ timeoutMs: 25 }))
   host.install()
-  await preStep(ctx, session)
-  appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
-  appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
+  await ctx.preStep(preStepPayload(session))
+  liveResult(ctx, session, 'call-0', 'bash', 'E'.repeat(200))
+  ctx.llm.streamFactory = () => hungStream()()
   const before = session.events.length
   const startedAt = Date.now()
-  const decision = await preStep(ctx, session)
-  const elapsed = Date.now() - startedAt
-  assert.equal(decision.kind, 'accept', 'main pre-step must still return its decision')
-  assert.equal(elapsed < 2000, true, `step should stop waiting after the timeout, took ${elapsed}ms`)
-  assert.equal(session.events.length, before, 'timed-out run must not append surface events')
-  assert.equal(disposed, true, 'timed-out activation must be disposed')
-  assert.equal(host.runs.size, 0)
-  assert.equal(host.counters.get(session.id).observedCalls, 0, 'timed-out run resets the counter window')
+  await ctx.preStep(preStepPayload(session))
+  assert.equal(Date.now() - startedAt < 2000, true)
+  assert.equal(session.events.length, before)
+
+  const ctx2 = createFakeCtx()
+  const session2 = createFakeSession()
+  const host2 = new SlimmerHost(ctx2, hostConfig())
+  host2.install()
+  await ctx2.preStep(preStepPayload(session2))
+  liveResult(ctx2, session2, 'call-0', 'bash', 'F'.repeat(200))
+  ctx2.llm.streamFactory = () => textPlanStream('', { throwError: new Error('provider down') })()
+  const before2 = session2.events.length
+  await ctx2.preStep(preStepPayload(session2))
+  assert.equal(session2.events.length, before2)
+})
+
+test('diagnostics file records trigger/llm/plan/validate/apply on a successful run', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'slimmer-diag-'))
+  const diagnosticsFile = path.join(directory, 'diagnostics.jsonl')
+  try {
+    const ctx = createFakeCtx()
+    const session = createFakeSession()
+    const host = new SlimmerHost(ctx, hostConfig({ diagnosticsFile }))
+    host.install()
+    await ctx.preStep(preStepPayload(session))
+    liveResult(ctx, session, 'call-0', 'read_file', 'G'.repeat(500))
+    liveResult(ctx, session, 'call-1', 'read_file', 'G'.repeat(500))
+    ctx.llm.streamFactory = textPlanStream({
+      summary: '去重',
+      items: [{ index: 1, op: 'drop', evidence: { kind: 'duplicate' }, duplicateOf: 'call-0', reason: '重复' }],
+    })
+    await ctx.preStep(preStepPayload(session))
+    const records = fs.readFileSync(diagnosticsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    const kinds = records.map((record) => record.kind)
+    for (const kind of ['trigger', 'llm-start', 'llm-result', 'plan', 'validate', 'apply']) {
+      assert.equal(kinds.includes(kind), true, `missing diagnostics kind ${kind}`)
+    }
+    const apply = records.find((record) => record.kind === 'apply')
+    assert.equal(apply.finishReason, 'stop')
+    assert.equal(apply.retried, false)
+    assert.deepEqual(apply.usage, { promptTokens: 100, completionTokens: 20 })
+    assert.equal(typeof apply.durationMs, 'number')
+    assert.equal(records.every((record) => typeof record.ts === 'number' && record.ts > 0), true)
+    assert.equal(records.every((record) => record.sessionId === session.id), true)
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('helper functions keep their documented contracts', () => {
+  assert.equal(extractPlanFromText('```json\n{"a":1}\n```').a, 1)
+  assert.equal(parsePlannerText('prefix {"a":1} suffix').a, 1)
+  assert.equal(parsePlannerText('{"a":1}').a, 1)
+  assert.equal(parsePlannerText('no json here'), null)
+  assert.equal(estimateMessageTokens(undefined, { content: [{ type: 'text', text: 'abcd' }] }), 1)
+  assert.equal(typeof buildPlannerInstruction({ locale: 'zh', policy: 'conservative' }), 'string')
 })

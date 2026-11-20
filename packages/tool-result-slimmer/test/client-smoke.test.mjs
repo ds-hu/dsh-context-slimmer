@@ -66,8 +66,97 @@ globalThis.__ModuleLoader__ = {
   },
 };
 
-/** Disposal-free hook state: tests set `hookValue` and re-render the component. */
-let hookValue = false;
+/** Compare effect dependency lists the way React does. */
+const depsEqual = (left, right) => {
+  if (left === undefined || right === undefined || left.length !== right.length) return false;
+  return left.every((value, index) => Object.is(value, right[index]));
+};
+
+/**
+ * Minimal hook runtime: per-component-pool state slots, dependency-tracked
+ * effects, and a dirty flag so a render helper can flush state updates. It is
+ * deliberately not React: it reproduces only the hook contract the bundle uses
+ * (`useState`, `useEffect`, `useRef`), which is enough to drive interactions and
+ * assert the rendered tree.
+ */
+function createHookRuntime() {
+  const slots = [];
+  const cleanups = new Map();
+  let cursor = 0;
+  let dirty = false;
+  let pendingEffects = [];
+  const runtime = {
+    reset() {
+      slots.length = 0;
+      cleanups.clear();
+      cursor = 0;
+      dirty = false;
+      pendingEffects = [];
+    },
+    resetRender() {
+      cursor = 0;
+      pendingEffects = [];
+    },
+    useState(initial) {
+      const index = cursor++;
+      if (!(index in slots)) {
+        slots[index] = { value: typeof initial === 'function' ? initial() : initial };
+      }
+      const slot = slots[index];
+      const set = (next) => {
+        const value = typeof next === 'function' ? next(slot.value) : next;
+        if (!Object.is(value, slot.value)) {
+          slot.value = value;
+          dirty = true;
+        }
+      };
+      return [slot.value, set];
+    },
+    useRef(initial) {
+      const index = cursor++;
+      if (!(index in slots)) slots[index] = { value: { current: initial } };
+      return slots[index].value;
+    },
+    useEffect(effect, deps) {
+      const index = cursor++;
+      if (!(index in slots)) {
+        slots[index] = { deps };
+        pendingEffects.push({ index, effect });
+        return;
+      }
+      const slot = slots[index];
+      if (deps === undefined || !depsEqual(slot.deps, deps)) {
+        slot.deps = deps;
+        pendingEffects.push({ index, effect });
+      }
+    },
+    flushEffects() {
+      const queued = pendingEffects;
+      pendingEffects = [];
+      for (const { index, effect } of queued) {
+        const previous = cleanups.get(index);
+        if (typeof previous === 'function') previous();
+        const cleanup = effect();
+        cleanups.set(index, cleanup);
+      }
+    },
+    takeDirty() {
+      const value = dirty;
+      dirty = false;
+      return value;
+    },
+    unmount() {
+      for (const cleanup of cleanups.values()) {
+        if (typeof cleanup === 'function') cleanup();
+      }
+      cleanups.clear();
+    },
+  };
+  return runtime;
+}
+
+const hookRuntime = createHookRuntime();
+
 const ReactMock = {
   createElement(type, props, ...children) {
     return { __element: true, type, props: props ?? {}, children };
@@ -77,9 +166,9 @@ const ReactMock = {
     wrapped.__memo = true;
     return wrapped;
   },
-  useState() {
-    return [hookValue, () => {}];
-  },
+  useState: (...args) => hookRuntime.useState(...args),
+  useRef: (...args) => hookRuntime.useRef(...args),
+  useEffect: (...args) => hookRuntime.useEffect(...args),
 };
 
 const factoryRequire = (specifier) => {
@@ -137,7 +226,7 @@ const effects = [];
 const localeRegistrations = [];
 const definitions = [];
 const slotRegistrations = [];
-let injectedSlotName = null;
+const injectedSlotNames = [];
 let currentLocale = 'zh';
 
 const interpolate = (template, params) => {
@@ -176,7 +265,7 @@ const ctx = {
   },
   slots: {
     inject(name, callback) {
-      injectedSlotName = name;
+      injectedSlotNames.push(name);
       callback();
       return () => {};
     },
@@ -193,9 +282,13 @@ mod.apply(ctx);
  * apply() registrations
  * ------------------------------------------------------------------ */
 
-assert.equal(injectedSlotName, 'conversation.chat.node', 'waits for the Chat keyed slot declaration');
+assert.deepEqual(
+  injectedSlotNames,
+  ['conversation.chat.node', 'plugins.row.config'],
+  'waits for both keyed slot declarations (Chat row + Plugins config row)',
+);
 assert.equal(definitions.length, 1, 'one Conversation Definition registered');
-assert.equal(slotRegistrations.length, 1, 'one keyed Chat renderer registered');
+assert.equal(slotRegistrations.length, 2, 'one keyed Chat renderer and one Plugins config renderer registered');
 assert.equal(localeRegistrations.length, 1, 'dictionaries registered in one call');
 assert.equal(localeRegistrations[0].ns, LOCALE_NS);
 for (const locale of ['zh', 'en']) {
@@ -218,6 +311,7 @@ const styleTag = fakeDocument.head.children[0];
 assert.equal(styleTag.dataset.plugin, PACKAGE_ID, 'style tag carries the package ownership marker');
 assert.ok(styleTag.textContent.includes('--dsw-alias-label-tertiary'), 'stylesheet uses theme tokens');
 assert.ok(styleTag.textContent.includes('.ctxslim-row'), 'stylesheet carries the row rules');
+assert.ok(styleTag.textContent.includes('.ctxslim-config-form'), 'stylesheet carries the config form rules');
 
 const definition = definitions[0];
 assert.equal(definition.kind, T.NODE_KIND, 'definition kind is the renderer key');
@@ -232,6 +326,16 @@ assert.deepEqual(slot.options, {
   locale: LOCALE_NS,
 });
 assert.equal(typeof slot.Component, 'function', 'renderer component registered');
+
+const configSlot = slotRegistrations[1];
+assert.equal(T.PLUGIN_CONFIG_SLOT, 'plugins.row.config');
+assert.equal(T.PLUGIN_CONFIG_KEY, '@ds-hu/dsh-context-slimmer#context-slimmer-tool-result');
+assert.deepEqual(configSlot.options, {
+  name: 'plugins.row.config',
+  key: T.PLUGIN_CONFIG_KEY,
+  locale: LOCALE_NS,
+});
+assert.equal(typeof configSlot.Component, 'function', 'Plugins row config renderer registered');
 
 /* ------------------------------------------------------------------ *
  * Definition matching: primary compaction/prune channel
@@ -444,9 +548,26 @@ const childrenOf = (element) => {
   for (const child of element.children) visit(child);
   return out;
 };
+/**
+ * Render one component with the shared hook runtime until state/effects settle.
+ * Call `hookRuntime.reset()` first for a fresh component mount.
+ */
+const renderComponent = (component, props) => {
+  let tree;
+  let guard = 0;
+  do {
+    hookRuntime.resetRender();
+    tree = component(props);
+    hookRuntime.flushEffects();
+  } while (hookRuntime.takeDirty() && guard++ < 16);
+  return tree;
+};
+const findByAttribute = (tree, attribute) => findAll(tree, (element) => element.props[attribute] !== undefined);
+const findField = (tree, name) => findAll(tree, (element) => element.props['data-field'] === name)[0];
 
-hookValue = false;
-const collapsed = slot.Component({ node, t: translate });
+hookRuntime.reset();
+const renderChatRow = (props) => renderComponent(slot.Component, props);
+const collapsed = renderChatRow({ node, t: translate });
 assert.equal(collapsed.type, 'div');
 assert.equal(collapsed.props['data-ctxslimmer-row'], '');
 assert.equal(collapsed.props['data-status'], 'applied');
@@ -464,8 +585,8 @@ assert.equal(toggle.props.type, 'button', 'native button keeps Enter/Space keybo
 assert.equal(toggle.props['aria-expanded'], false, 'collapsed disclosure exposes aria-expanded=false');
 assert.equal(toggle.props.disabled, false, 'expandable row is enabled');
 
-hookValue = true;
-const expanded = slot.Component({ node, t: translate });
+toggle.props.onClick();
+const expanded = renderChatRow({ node, t: translate });
 assert.equal(expanded.props['data-expanded'], 'true');
 assert.equal(childrenOf(expanded).length, 2, 'expanded row renders a body');
 const expandedToggle = childrenOf(expanded)[0];
@@ -503,8 +624,8 @@ const renderSummary = (payload, seq, options = {}) => {
     matches: [{ event: recordEvent, location }],
   });
   assert.ok(recordNode !== null);
-  hookValue = false;
-  return slot.Component({ node: recordNode, t: translate });
+  hookRuntime.reset();
+  return renderComponent(slot.Component, { node: recordNode, t: translate });
 };
 
 const noopRow = renderSummary({ batchId: 'batch-2', role: SUMMARY_ROLE, status: 'no-op', items: [], totals: { items: 0, charsSaved: 0 } }, 21);
@@ -540,7 +661,8 @@ assert.equal(normalized.totals.charsSaved, 75, 'saved count falls back to before
  * ------------------------------------------------------------------ */
 
 currentLocale = 'en';
-const englishRow = slot.Component({ node, t: translate });
+hookRuntime.reset();
+const englishRow = renderComponent(slot.Component, { node, t: translate });
 const englishText = collectText(englishRow);
 assert.ok(englishText.includes('Tool results slimmed'), 'en title');
 assert.ok(englishText.includes('2 items'), 'en item count');
@@ -549,10 +671,346 @@ assert.ok(englishText.includes('9,575 chars freed'), 'en saved-character summary
 currentLocale = 'zh';
 
 /* ------------------------------------------------------------------ *
+ * Native Plugins panel: `plugins.row.config` renderer (v0.2)
+ * ------------------------------------------------------------------ */
+
+/** Host-resolved section fixture: only volatile fields, schema defaults applied. */
+const CONFIG_VALUE = Object.freeze({
+  enabled: true,
+  everyNToolCalls: 8,
+  minChars: 24000,
+  protectRecent: 2,
+  minTargetChars: 256,
+  maxTargets: 12,
+  policy: 'conservative',
+  includeSubagents: true,
+  triggerOnErrorOnly: false,
+  timeoutMs: 120000,
+  model: Object.freeze({ provider: 'inherit', model: 'inherit', reasoningEffort: 'inherit', maxOutputTokens: 2048 }),
+});
+
+const CONFIG_FIELD_NAMES = T.CONFIG_FIELDS.map((spec) => spec.name);
+
+/** Fake `ConfigPageForm`: one snapshot plus a recording `mutate`. */
+const makeForm = (options = {}) => {
+  const value = 'value' in options ? options.value : CONFIG_VALUE;
+  const calls = [];
+  return {
+    state: {
+      status: options.status ?? 'ready',
+      value,
+      base: undefined,
+      user: undefined,
+      revision: options.revision ?? 7,
+      writable: options.writable !== false,
+    },
+    calls,
+    mutate(ops, expectedRevision) {
+      calls.push({ ops, expectedRevision });
+      if (options.failure instanceof Error) return Promise.reject(options.failure);
+      return Promise.resolve(options.accepted === false ? false : true);
+    },
+  };
+};
+
+/** The slot component dispatches owner props to the two leaf views. */
+hookRuntime.reset();
+assert.equal(T.ConfigView({ view: 'summary', form: undefined, t: translate }).type, T.ConfigSummary, 'summary view dispatches to ConfigSummary');
+assert.equal(T.ConfigView({ view: 'page', form: undefined, t: translate }).type, T.ConfigPage, 'page view dispatches to ConfigPage');
+
+const configPageProps = (form, props = {}) => ({ form, t: translate, ...props });
+const configSummaryProps = (form, props = {}) => ({ form, t: translate, ...props });
+const mountConfigSummary = (form) => {
+  hookRuntime.reset();
+  return renderComponent(T.ConfigSummary, configSummaryProps(form));
+};
+const mountConfigPage = (form) => {
+  hookRuntime.reset();
+  return renderComponent(T.ConfigPage, configPageProps(form));
+};
+const paintConfigPage = (form) => renderComponent(T.ConfigPage, configPageProps(form));
+
+/** Dispatch one control's change/click after re-reading the latest tree. */
+const changeFieldValue = (tree, name, value) => {
+  const control = findField(tree, name);
+  assert.ok(control !== undefined, `data-field=${name} is rendered`);
+  control.props.onChange({ target: { value } });
+  return control;
+};
+const toggleCheckbox = (tree, name, checked) => {
+  const control = findField(tree, name);
+  assert.ok(control !== undefined, `data-field=${name} is rendered`);
+  control.props.onChange({ target: { checked } });
+  return control;
+};
+/** Whether a field's control is disabled (segmented options are buttons). */
+const controlDisabled = (tree, name) => {
+  const control = findField(tree, name);
+  if (name === 'policy') {
+    const options = findAll(control, (element) => element.type === 'button');
+    return options.length > 0 && options.every((element) => element.props.disabled === true);
+  }
+  return control.props.disabled === true;
+};
+const clickOption = (tree, name, label) => {
+  const control = findField(tree, name);
+  assert.ok(control !== undefined, `data-field=${name} is rendered`);
+  const options = findAll(control, (element) => element.type === 'button');
+  const target = options.find((element) => collectText(element) === label);
+  assert.ok(target !== undefined, `option "${label}" is rendered for ${name}`);
+  target.props.onClick();
+};
+
+/* Summary view: one line, with no-form/loading/unavailable fallbacks. */
+const summary = mountConfigSummary(makeForm());
+assert.equal(summary.type, 'span');
+assert.equal(summary.props['data-ctxslim-config'], '');
+assert.equal(summary.props['data-ctxslim-view'], 'summary');
+assert.equal(summary.props['data-ctxslim-status'], 'ready');
+assert.equal(collectText(summary), '每 8 次调用 · 保守策略 · 模型跟随当前 Agent');
+
+const disabledSummary = mountConfigSummary(makeForm({ value: { ...CONFIG_VALUE, enabled: false } }));
+assert.equal(collectText(disabledSummary), '已停用 · 每 8 次调用 · 保守策略 · 模型跟随当前 Agent');
+
+const explicitModelSummary = mountConfigSummary(makeForm({
+  value: { ...CONFIG_VALUE, model: { ...CONFIG_VALUE.model, provider: 'deepseek', model: 'deepseek-v4.1-flash' } },
+}));
+assert.equal(collectText(explicitModelSummary), '每 8 次调用 · 保守策略 · 模型 deepseek/deepseek-v4.1-flash');
+
+const noFormSummary = mountConfigSummary(undefined);
+assert.equal(noFormSummary.props['data-ctxslim-status'], 'no-form');
+assert.ok(collectText(noFormSummary).includes('没有可编辑的 Host 配置'));
+
+const loadingSummary = mountConfigSummary(makeForm({ status: 'loading', value: undefined }));
+assert.equal(loadingSummary.props['data-ctxslim-status'], 'loading');
+assert.equal(collectText(loadingSummary), '正在加载配置…');
+
+const unavailableSummary = mountConfigSummary(makeForm({ status: 'unavailable', value: undefined }));
+assert.equal(unavailableSummary.props['data-ctxslim-status'], 'unavailable');
+assert.ok(collectText(unavailableSummary).includes('配置不可用'));
+
+/* Page view: every field, native controls, pending-save wiring. */
+const pageForm = makeForm();
+let page = mountConfigPage(pageForm);
+assert.equal(page.type, 'div');
+assert.equal(page.props['data-ctxslim-config'], '');
+assert.equal(page.props['data-ctxslim-view'], 'page');
+assert.equal(page.props['data-ctxslim-status'], 'ready');
+assert.equal(page.props['data-ctxslim-dirty'], 'false');
+assert.equal(page.props['data-ctxslim-writable'], 'true');
+assert.equal(findByAttribute(page, 'data-ctxslim-readonly').length, 0, 'writable page shows no read-only banner');
+
+const renderedFields = findAll(page, (element) => element.props['data-field'] !== undefined);
+assert.deepEqual(
+  renderedFields.map((element) => element.props['data-field']),
+  CONFIG_FIELD_NAMES,
+  'every documented field carries its data-field hook, in form order',
+);
+for (const name of CONFIG_FIELD_NAMES) {
+  const control = findField(page, name);
+  assert.ok(control !== undefined, `data-field=${name} is rendered`);
+  assert.equal(controlDisabled(page, name), false, `${name} is editable`);
+}
+assert.equal(renderedFields.length, 14, 'thirteen scalar fields plus the optional reasoning-effort override');
+const save = findByAttribute(page, 'data-ctxslim-save')[0];
+assert.equal(save.type, 'button');
+assert.equal(save.props.type, 'button');
+assert.equal(save.props.disabled, true, 'save is disabled until the draft differs');
+assert.ok(collectText(page).includes('触发阈值：新增工具调用数'), 'field labels come from the dictionary');
+
+/* Editing marks the draft dirty and enables the single save action. */
+changeFieldValue(page, 'everyNToolCalls', '20');
+page = paintConfigPage(pageForm);
+assert.equal(page.props['data-ctxslim-dirty'], 'true');
+assert.equal(findByAttribute(page, 'data-ctxslim-save')[0].props.disabled, false);
+assert.ok(collectText(page).includes('有未保存的修改'));
+
+/* Invalid numbers surface inline errors and block saving. */
+changeFieldValue(page, 'everyNToolCalls', '');
+page = paintConfigPage(pageForm);
+const numberError = findByAttribute(page, 'data-ctxslim-field-error').filter((element) => element.props['data-ctxslim-field-error'] === 'everyNToolCalls');
+assert.equal(numberError.length, 1, 'empty number shows an inline error');
+assert.ok(collectText(page).includes('请输入整数'));
+assert.equal(findByAttribute(page, 'data-ctxslim-save')[0].props.disabled, true);
+
+changeFieldValue(page, 'everyNToolCalls', '999');
+page = paintConfigPage(pageForm);
+assert.ok(collectText(page).includes('请输入 1 到 200 之间的整数'), 'range error names the documented bounds');
+
+/* One atomic mutate carries only changed fields, nested model paths included. */
+const saveForm = makeForm();
+let formPage = mountConfigPage(saveForm);
+changeFieldValue(formPage, 'everyNToolCalls', '20');
+formPage = paintConfigPage(saveForm);
+clickOption(formPage, 'policy', '激进');
+formPage = paintConfigPage(saveForm);
+toggleCheckbox(formPage, 'includeSubagents', false);
+formPage = paintConfigPage(saveForm);
+changeFieldValue(formPage, 'model.provider', 'deepseek');
+formPage = paintConfigPage(saveForm);
+changeFieldValue(formPage, 'model.model', 'deepseek-v4.1-flash');
+formPage = paintConfigPage(saveForm);
+changeFieldValue(formPage, 'model.reasoningEffort', 'high');
+formPage = paintConfigPage(saveForm);
+changeFieldValue(formPage, 'model.maxOutputTokens', '4096');
+formPage = paintConfigPage(saveForm);
+assert.equal(findByAttribute(formPage, 'data-ctxslim-save')[0].props.disabled, false, 'valid edits enable save');
+
+findByAttribute(formPage, 'data-ctxslim-save')[0].props.onClick();
+const savingPage = paintConfigPage(saveForm);
+assert.equal(savingPage.props['data-ctxslim-status'], 'ready');
+assert.equal(findByAttribute(savingPage, 'data-ctxslim-save')[0].props['aria-busy'], true, 'pending mutation marks the save busy');
+assert.equal(findByAttribute(savingPage, 'data-ctxslim-save')[0].props.disabled, true, 'pending mutation disables the save button');
+
+await Promise.resolve();
+await Promise.resolve();
+const savedPage = paintConfigPage(saveForm);
+assert.equal(saveForm.calls.length, 1, 'one atomic mutate call for the whole edit');
+assert.equal(saveForm.calls[0].expectedRevision, 7, 'mutate carries the snapshot revision fence');
+assert.deepEqual(saveForm.calls[0].ops, [
+  { op: 'set', path: ['everyNToolCalls'], value: 20 },
+  { op: 'set', path: ['policy'], value: 'aggressive' },
+  { op: 'set', path: ['includeSubagents'], value: false },
+  { op: 'set', path: ['model', 'provider'], value: 'deepseek' },
+  { op: 'set', path: ['model', 'model'], value: 'deepseek-v4.1-flash' },
+  { op: 'set', path: ['model', 'reasoningEffort'], value: 'high' },
+  { op: 'set', path: ['model', 'maxOutputTokens'], value: 4096 },
+]);
+const savedMessage = findByAttribute(savedPage, 'data-ctxslim-message')[0];
+assert.equal(savedMessage.props['data-ctxslim-message'], 'saved');
+assert.ok(collectText(savedPage).includes('已保存'));
+
+/* A refreshed Host snapshot clears the draft but keeps the saved message. */
+const acceptedValue = {
+  ...CONFIG_VALUE,
+  everyNToolCalls: 20,
+  policy: 'aggressive',
+  includeSubagents: false,
+  model: { ...CONFIG_VALUE.model, provider: 'deepseek', model: 'deepseek-v4.1-flash', reasoningEffort: 'high', maxOutputTokens: 4096 },
+};
+const refreshedForm = makeForm({ value: acceptedValue, revision: 8 });
+const refreshedPage = paintConfigPage(refreshedForm);
+assert.equal(refreshedPage.props['data-ctxslim-dirty'], 'false', 'accepted Host snapshot clears the dirty draft');
+assert.equal(findField(refreshedPage, 'model.provider').props.value, 'deepseek');
+
+/* Refusal: keep edits, tell the user the page refreshed, show failure. */
+const refusedForm = makeForm({ accepted: false });
+let refusedPage = mountConfigPage(refusedForm);
+changeFieldValue(refusedPage, 'everyNToolCalls', '30');
+refusedPage = paintConfigPage(refusedForm);
+findByAttribute(refusedPage, 'data-ctxslim-save')[0].props.onClick();
+await Promise.resolve();
+await Promise.resolve();
+refusedPage = paintConfigPage(refusedForm);
+const refusedMessage = findByAttribute(refusedPage, 'data-ctxslim-message')[0];
+assert.equal(refusedMessage.props['data-ctxslim-message'], 'failed');
+assert.ok(collectText(refusedPage).includes('已刷新，请重试'), 'revision conflict / refusal tells the user to retry');
+assert.equal(refusedPage.props['data-ctxslim-dirty'], 'true', 'refused edits stay in the draft');
+
+/* Transport rejection: keep edits and surface the failure. */
+const errorForm = makeForm({ failure: new Error('socket closed') });
+let errorPage = mountConfigPage(errorForm);
+changeFieldValue(errorPage, 'everyNToolCalls', '30');
+errorPage = paintConfigPage(errorForm);
+findByAttribute(errorPage, 'data-ctxslim-save')[0].props.onClick();
+await Promise.resolve();
+await Promise.resolve();
+errorPage = paintConfigPage(errorForm);
+assert.ok(collectText(errorPage).includes('socket closed'), 'transport failure detail is surfaced');
+assert.equal(errorPage.props['data-ctxslim-dirty'], 'true');
+
+/* Provider/model pair: one side alone is rejected before mutate. */
+const pairForm = makeForm();
+let pairPage = mountConfigPage(pairForm);
+changeFieldValue(pairPage, 'model.provider', 'deepseek');
+pairPage = paintConfigPage(pairForm);
+const pairErrors = findByAttribute(pairPage, 'data-ctxslim-field-error');
+assert.equal(pairErrors.length, 2, 'both model fields flag the incomplete pair');
+assert.ok(collectText(pairPage).includes('必须同时填写'));
+assert.equal(findByAttribute(pairPage, 'data-ctxslim-save')[0].props.disabled, true);
+assert.equal(pairForm.calls.length, 0, 'invalid draft never reaches mutate');
+
+/* Read-only deployment: controls disabled, no save action, banner shown. */
+const readonlyPage = mountConfigPage(makeForm({ writable: false }));
+assert.equal(readonlyPage.props['data-ctxslim-writable'], 'false');
+for (const name of CONFIG_FIELD_NAMES) {
+  assert.equal(controlDisabled(readonlyPage, name), true, `${name} disabled when the Host is read-only`);
+}
+assert.equal(findByAttribute(readonlyPage, 'data-ctxslim-save').length, 0, 'read-only page offers no save action');
+assert.ok(collectText(readonlyPage).includes('只读'));
+
+/* Status fallbacks and the missing-form fallback. */
+const loadingPage = mountConfigPage(makeForm({ status: 'loading', value: undefined }));
+assert.equal(loadingPage.props['data-ctxslim-status'], 'loading');
+assert.ok(collectText(loadingPage).includes('正在加载配置'));
+assert.equal(findAll(loadingPage, (element) => element.props['data-field'] !== undefined).length, 0);
+
+const unavailablePage = mountConfigPage(makeForm({ status: 'unavailable', value: undefined }));
+assert.equal(unavailablePage.props['data-ctxslim-status'], 'unavailable');
+assert.ok(collectText(unavailablePage).includes('配置不可用'));
+
+const noFormPage = mountConfigPage(undefined);
+assert.equal(noFormPage.props['data-ctxslim-status'], 'no-form');
+assert.equal(findByAttribute(noFormPage, 'data-ctxslim-no-form').length, 1);
+assert.ok(collectText(noFormPage).includes('没有可编辑的 Host 配置'), 'row without volatile settings explains itself');
+
+/* Pure helpers: defaults, nested paths, and the empty-means-inherit rule. */
+const fallbackDraft = T.buildDraft({});
+assert.equal(fallbackDraft.everyNToolCalls, '12');
+assert.equal(fallbackDraft.policy, 'conservative');
+assert.equal(fallbackDraft.minTargetChars, '4096');
+assert.equal(fallbackDraft['model.provider'], '', 'inherit routes render as an empty input');
+assert.equal(fallbackDraft['model.reasoningEffort'], 'inherit');
+
+const inheritBase = { ...CONFIG_VALUE, model: { ...CONFIG_VALUE.model, provider: 'deepseek', model: 'deepseek-v4.1-flash' } };
+const clearedModelDraft = T.buildDraft(inheritBase);
+clearedModelDraft['model.provider'] = '';
+clearedModelDraft['model.model'] = '';
+assert.deepEqual(T.buildOps(T.buildDraft(inheritBase), clearedModelDraft), [
+  { op: 'set', path: ['model', 'provider'], value: 'inherit' },
+  { op: 'set', path: ['model', 'model'], value: 'inherit' },
+], 'clearing both model inputs writes inherit back');
+
+assert.deepEqual(T.buildOps(T.buildDraft(CONFIG_VALUE), T.buildDraft(CONFIG_VALUE)), [], 'unchanged draft produces no ops');
+assert.equal(
+  T.validateDraft({ ...T.buildDraft(CONFIG_VALUE), 'model.provider': 'deepseek' }).errors['model.model'],
+  'modelPair',
+);
+
+/* Every config copy key is present in both dictionaries. */
+const CONFIG_COPY_KEYS = [
+  'config.loading', 'config.unavailable', 'config.noForm', 'config.readOnly',
+  'config.save', 'config.saving', 'config.saved', 'config.failed', 'config.failedRefresh',
+  'config.dirty', 'config.invalidNumber', 'config.invalidRange', 'config.modelPair',
+  'config.invalidPolicy', 'config.invalidOption', 'config.model.placeholder', 'config.policySuffix',
+  'config.summary.disabled', 'config.summary.calls', 'config.summary.modelInherit', 'config.summary.model',
+];
+for (const spec of T.CONFIG_FIELDS) {
+  for (const suffix of ['label', 'hint']) CONFIG_COPY_KEYS.push('config.' + spec.name + '.' + suffix);
+  if (spec.kind === 'segmented') for (const option of spec.options) CONFIG_COPY_KEYS.push('config.policy.' + option);
+  if (spec.kind === 'select') for (const option of spec.options) CONFIG_COPY_KEYS.push('config.reasoning.' + option);
+}
+for (const locale of ['zh', 'en']) {
+  for (const key of CONFIG_COPY_KEYS) {
+    assert.equal(typeof T.dictionaries[locale][key], 'string', `${locale} carries ${key}`);
+  }
+}
+
+/* English copy for the page and its save action. */
+currentLocale = 'en';
+const englishPage = mountConfigPage(makeForm());
+assert.equal(findByAttribute(englishPage, 'data-ctxslim-save')[0].children.join(''), 'Save');
+assert.ok(collectText(englishPage).includes('Enable tool-result slimming'));
+assert.ok(collectText(englishPage).includes('Slimming policy'));
+assert.ok(collectText(englishPage).includes('Reasoning effort'));
+currentLocale = 'zh';
+
+/* ------------------------------------------------------------------ *
  * Teardown
  * ------------------------------------------------------------------ */
 
+hookRuntime.unmount();
 for (const effect of effects) effect.dispose();
 delete globalThis.document;
 
-process.stdout.write('client-smoke: ok (bundle format, definition, renderer, locale, styles)\n');
+process.stdout.write('client-smoke: ok (bundle format, definition, renderer, locale, styles, config page)\n');

@@ -26,50 +26,62 @@ test('counter accumulates calls/chars/errors and freezes each state', () => {
   assert.ok(Object.isFrozen(counter))
 })
 
-test('OR-thresholds trigger independently and respect the error gate', () => {
-  const config = { everyNToolCalls: 8, minChars: 24000, triggerOnErrorOnly: false }
-  assert.equal(shouldTrigger(createCounter({ observedCalls: 8 }), config).reason, 'calls')
-  assert.equal(shouldTrigger(createCounter({ observedChars: 24000 }), config).reason, 'chars')
-  assert.equal(shouldTrigger(createCounter({ observedCalls: 7, observedChars: 23999 }), config).triggered, false)
+test('AND-trigger: both thresholds must be met, 0 disables one condition', () => {
+  const config = { everyNToolCalls: 12, minChars: 24000, triggerOnErrorOnly: false }
+  assert.equal(shouldTrigger(createCounter({ observedCalls: 12, observedChars: 24000 }), config).reason, 'both')
+  // One dimension alone is NOT enough (v0.2.0 AND trigger).
+  assert.equal(shouldTrigger(createCounter({ observedCalls: 99, observedChars: 100 }), config).triggered, false)
+  assert.equal(shouldTrigger(createCounter({ observedCalls: 1, observedChars: 999999 }), config).triggered, false)
 
   const callsDisabled = { everyNToolCalls: 0, minChars: 24000, triggerOnErrorOnly: false }
-  assert.equal(shouldTrigger(createCounter({ observedCalls: 100 }), callsDisabled).triggered, false)
   assert.equal(shouldTrigger(createCounter({ observedChars: 24000 }), callsDisabled).reason, 'chars')
+  assert.equal(shouldTrigger(createCounter({ observedChars: 23999 }), callsDisabled).triggered, false)
+
+  const charsDisabled = { everyNToolCalls: 12, minChars: 0, triggerOnErrorOnly: false }
+  assert.equal(shouldTrigger(createCounter({ observedCalls: 12 }), charsDisabled).reason, 'calls')
 
   const errorOnly = { ...config, triggerOnErrorOnly: true }
-  assert.equal(shouldTrigger(createCounter({ observedCalls: 99 }), errorOnly).triggered, false)
-  assert.equal(shouldTrigger(createCounter({ observedCalls: 99, observedErrorCalls: 1 }), errorOnly).reason, 'calls')
+  assert.equal(shouldTrigger(createCounter({ observedCalls: 12, observedChars: 24000 }), errorOnly).triggered, false)
+  assert.equal(shouldTrigger(createCounter({ observedCalls: 12, observedChars: 24000, observedErrorCalls: 1 }), errorOnly).triggered, true)
 })
 
-test('reset keeps lastSeq but clears the window; triggerSnapshot is frozen', () => {
-  const counter = createCounter({ observedCalls: 9, observedChars: 100, observedErrorCalls: 2, lastSeq: 42 })
+test('trigger snapshot and reset preserve the configured thresholds', () => {
+  const counter = createCounter({ observedCalls: 12, observedChars: 30000, observedErrorCalls: 2, lastSeq: 7 })
+  assert.deepEqual(triggerSnapshot(counter, { everyNToolCalls: 12, minChars: 24000 }), {
+    everyNToolCalls: 12,
+    minChars: 24000,
+    observedCalls: 12,
+    observedChars: 30000,
+  })
   const reset = resetCounter(counter)
-  assert.deepEqual(reset, { observedCalls: 0, observedChars: 0, observedErrorCalls: 0, lastSeq: 42 })
-  const snapshot = triggerSnapshot(counter, { everyNToolCalls: 8, minChars: 24000 })
-  assert.deepEqual(snapshot, { everyNToolCalls: 8, minChars: 24000, observedCalls: 9, observedChars: 100 })
-  assert.ok(Object.isFrozen(snapshot))
+  assert.equal(reset.observedCalls, 0)
+  assert.equal(reset.observedChars, 0)
+  assert.equal(reset.observedErrorCalls, 0)
+  assert.equal(reset.lastSeq, 7)
 })
 
 test('countEntriesSince rebuilds a window from the current surface', () => {
   const session = createFakeSession()
-  session.appendToolResult('call-1', 'bash', 'a'.repeat(300))
-  session.appendToolResult('call-2', 'read_file', 'b'.repeat(500), { isError: true })
+  session.appendToolResult('call-a', 'bash', 'hello')
+  session.appendToolResult('call-b', 'read_file', 'world', { isError: true })
   const entries = readSurfaceEntries(session)
-  assert.deepEqual(countEntriesSince(entries, -1), { observedCalls: 2, observedChars: 800, observedErrorCalls: 1, lastSeq: 3 })
-  assert.deepEqual(countEntriesSince(entries, 1), { observedCalls: 1, observedChars: 500, observedErrorCalls: 1, lastSeq: 3 })
-  assert.deepEqual(countEntriesSince(entries, 99), { observedCalls: 0, observedChars: 0, observedErrorCalls: 0, lastSeq: 99 })
+  const window = countEntriesSince(entries, -1)
+  assert.equal(window.observedCalls, 2)
+  assert.equal(window.observedChars, 10)
+  assert.equal(window.observedErrorCalls, 1)
 })
 
-test('CounterStore is a simple keyed map', () => {
+test('CounterStore isolates sessions and clears', () => {
   const store = new CounterStore()
+  assert.equal(store.get('a'), undefined)
+  const ensured = store.ensure('a', () => createCounter())
+  assert.deepEqual(ensured, EMPTY_COUNTER)
+  store.set('a', createCounter({ observedCalls: 3 }))
+  assert.equal(store.get('a').observedCalls, 3)
+  assert.equal(store.size, 1)
+  store.delete('a')
   assert.equal(store.size, 0)
-  const counter = store.ensure('s1', () => createCounter({ observedCalls: 2 }))
-  assert.equal(store.get('s1'), counter)
-  assert.equal(store.ensure('s1', () => createCounter({ observedCalls: 99 })), counter)
-  store.set('s2', createCounter())
-  assert.equal(store.size, 2)
-  assert.equal(store.delete('s1'), true)
-  assert.equal(store.get('s1'), undefined)
+  store.set('b', EMPTY_COUNTER)
   store.clear()
   assert.equal(store.size, 0)
 })

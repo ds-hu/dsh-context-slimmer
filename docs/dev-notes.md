@@ -149,3 +149,53 @@
 **决策**：`config.timeoutMs` 是**硬超时**，覆盖两个阶段：`startActivation` 发布窗口与 `activation.result` 运行窗口。实现：一个 `AbortController` + 一个覆盖全程的 `setTimeout`，两个 await 都 `Promise.race([..., timeoutPromise])`；超时分支先 `aborter.abort()` 取消子激活、diagnostics 记 `activation-error stage:'start-timeout'|'result-timeout'`、`finally` 中 `await dispose()`（catch 吞掉 teardown 错误）后返回 `STATUS_FAILED`，主 Agent 的 `agent/pre-step` 正常返回其 decision（对主会话即 no-op）。`parentSignal` 仍通过 `AbortSignal.any` 合并，turn 取消同样会中止子激活。
 
 **测试**：`host.test.mjs` → “hard timeout: a never-settling activation.result fails the run without blocking the step”（`timeoutMs: 20`，断言 pre-step 正常返回、耗时受控、0 个 surface 事件、activation 被 dispose、计数窗口重置）。
+
+---
+
+## DEV-13 v0.2.0 实现决策（docs/plan-v0.2.md 绑定 + Lead 收紧/裁决）
+
+**策略（issue #2）**：默认 `policy: 'conservative'`。core `validatePlan` 对 conservative 做**确定性证据校验**（不是相信模型自报的 `evidence.kind`）：
+- `duplicate`：必须带 `duplicateOf: <callId>`；该候选存在、未在同批被 drop、同 tool、去首尾空白并统一换行后逐字相等；重复两端字符数 ≥ `minTargetChars`；
+- `superseded`：目标必须 `isError=true`，`supersededBy` 指向更晚 seq、同 tool、`isError=false`、未被同批 drop 的结果（不放宽 stale-read）；
+- `empty`：目标文本匹配核心常量 `EMPTY_OUTPUT_PATTERNS`（空白/(no output)/[no output]/仅退出码 0 等）；
+- 其余一律拒绝（conservative 下 `trim` 整单 `policy-op-trim`；`irrelevant`/`redundant-blocks` 仅 balanced/aggressive）。balanced：drop 证据放宽 + trim ≤ min(50%, 4000 chars)；aggressive：v0.1 lossy 规则（trim ≤ min(50%, 300 tokens/1200 chars)）。计划 §3 的“单批 drop ≤20% target char”经 Lead 裁决改为 **benchmark 观测指标，不进校验**。
+- AND 触发：`everyNToolCalls` 与 `minChars` 都满足才触发（0 视作该条件禁用）；默认 12/24000/3/4096/4。
+- `includeSubagents` 默认 true；`session.header.origin === 'subagent'` 时若 false 则跳过（计数与触发都跳过）。
+- drop 替换文案（Lead §9.1）：必须指向保留副本且明确**不要重读**，禁止 `re-fetch` 字样；duplicate → `duplicate of <callId> (kept above) — content identical, do not re-read`；superseded → `superseded by <callId> (successful, newer) — do not retry the failed command`；empty/兜底 → `... do not re-read`。
+- 候选扫描窗口（Lead §9.2）：先看最近 `max(protectRecent + maxTargets*3, 12)` 条工具结果，再按证据/长度过滤取 `maxTargets`；`protectRecent` 仍保护最新 N 条。
+
+## DEV-14 规划器改直调 `ctx.llm.stream()`（隐藏子 Agent + 输出预算根因）
+
+**根因（本机生产日志证据）**：v0.1.0 用 managed fork 子 Agent 规划，`request/header.config` 继承 `reasoningEffort:'max'` 同时被插件覆盖 `maxTokens:2048`；推理 token 与最终输出共享同一输出预算 → 15 个子会话中 14 个 `turn/end=max-tokens`，最后 assistant message 只有 reasoning block、没有任何 text/tool-call → 整批失败。**不是“思考过长”，也不是上下文窗口**。
+
+**修法**：删除 fork/`startActivation`/`agent/created` restrict/`tools/pre-execute` guard/child 会话与 `subagents` 依赖；host `inject` 改为 `['llm']`。一次 `ctx.llm.stream()`：
+- 模型三级 fallback：config `model.provider+model` 全非空 → `session.requestHeader()?.config` → `agent.options`；全空 → `STATUS_FAILED` + diagnostics `no-model`（no-op）。
+- `messages: [...session.deriveMessages(), {role:'user',content:[{type:'text',text:instruction}]}]`；`toolHistory: session.toolHistory()`；**不传 `tools`**；**不传 `purpose`**（非插件可声明的 core 枚举，避免被 compaction 特殊处理）；`sessionId: session.id`。
+- **输出预算**：`model.maxOutputTokens` 默认 **0 = 不传 maxTokens**（跟随 adapter 默认，不设共享输出预算）；`model.reasoningEffort` 默认 **'inherit' = 继承主模型本次路由的 effort**（保留思考；header/agent 都没有 effort 时不传 reasoningEffort；显式 off/low/medium/high/max 才覆盖）。非 0/非 inherit 才透传。截断时只重试一次不带 maxTokens 的调用。
+- **截断重试**：显式传了 maxTokens 且 finish=max-tokens 时，重试一次**不带 maxTokens** 的调用；仍 max-tokens → `STATUS_FAILED` + diagnostics `planner-truncated`（finishReason/usage/durationMs/retried），绝不应用半截计划。finish 仅 `stop|tool-calls`（或适配器未给 finish 的 `none`）视为成功；`aborted|error|max-tokens|未知` 失败。
+- **chunk 处理**（外部插件不能 import `@deepseek-ai/dsh-llm` 的 BlockAssembler）：手写等价 collector，合并 text-delta 与 block-end 的 text、收集 tool-call block；只把名为 `structured_output` 的 tool-call 当作计划兼容来源（仍不执行任何工具），否则解析全部 text block 的 JSON（直接 `JSON.parse` → 围栏 → 首尾 `{}` → 平衡扫描）；解析失败 diagnostics `planner-invalid-json`（finish/textLength/前 200 字）→ no-op。
+- **极简 prompt v1.4**（Lead 裁决：v0.1 提示词过长诱发推理膨胀）：中文/英文各 policy 一段，要求“只输出一个 JSON 对象、不要解释/思考/前后缀”，每个 item 只写必填字段、`reason ≤ 20 字`，保留 2 正例 + 1 反例；conservative 明说“无法证明安全就返回 `{"items":[]}`，不要猜测”。系统提示长度均 ≤ 2500 chars。
+- diagnostics：`trigger` / `llm-start` / `llm-result` / `llm-error` / `llm-truncation-retry` / `planner-truncated` / `planner-invalid-json` / `plan` / `validate` / `apply` / `no-op`；`plan`/`apply` 附带 `finishReason/usage{promptTokens,completionTokens}/durationMs/retried`。
+- 面板：所有进 form 的字段（含 `model.*` 四个子字段）在 schemastery 上 `.volatile()`（父 `model` 对象不能 volatile，否则 schemastery 拒绝嵌套）；`resolveConfig` 用结构检测 `get()` 解包 cosmokit volatile 值（不 import `@deepseek-ai/cosmokit`，遵守 R4）。
+- 测试：core 40（策略/证据/AND/volatile 解包/prompt v1.4）、module host 13（mock `ctx.llm.stream`：AND、继承路由、默认省略 maxTokens/reasoningEffort、显式透传、truncation retry 成功、持续截断 failed+diagnostics、结构化输出兼容、policy 拒绝、subagent 开关、no-model、硬超时、JSON 容错）。client-smoke 属 ui-dev 的 v0.2 配置页进行中。
+
+---
+
+## DEV-15 配置面板挂载 P0：Loader 已解析的 volatile 引用不能再次校验
+
+**现象**（v0.2.0 首次 CI 彩排）：插件面板模块行报红字 `原因：$.enabled expected boolean but got [object Object]`，settings 无 form（`data-ctxslim-status="no-form"`），row 实际未挂载。
+
+**根因**：所有面板字段改为 `.volatile()` 后，Loader 在调用 `apply(ctx, rawConfig)` **之前**已完成 schema 解析——每个 volatile 字段是 cosmokit 引用对象 `{ get(), [write] }`，不是 boolean/number。而 `resolveConfig(input)` 又直接 `Config(input)` 二次校验，boolean schema 收到引用对象 → 校验失败 → 行挂载失败。
+
+**修法**：`packages/core/lib/config.js` 新增 `unwrapVolatileDeep(value)`：结构检测 `get()`（不 import `@deepseek-ai/cosmokit`，遵守 R4），命中即递归解包 `.get()`；数组逐项、plain object 逐 key；null/其他值原样保留；不修改入参。`resolveConfig` 改为 `Config(unwrapVolatileDeep(input))`；返回路径仍用 `unwrapVolatile(validated[...])` 解包二次校验新生成的引用。另在 host `apply` 里对 `resolveConfig` 失败加 `logger.warn` + return 兜底，单行配置错误不崩 profile。
+
+**测试**：`core/test/config.test.mjs` 新增全字段（含 `model.*`）引用解包、嵌套数组/对象/null、plain 输入不变、引用返回错误类型仍抛 `bad-config`、输入不被 mutate；全量 56 pass。
+
+**经验**：凡是把 schemastery 字段标 `.volatile()` 的插件，`apply` 收到的 config 一律先深度解包引用再走自己的二次校验；settings 原生 `plainConfig()` 也是同样语义。
+
+---
+
+## DEV-16 面板 page 替换原生自动表单的取舍
+
+- 自定义 `plugins.row.config` page 覆盖原生自动表单后，**只有 page 渲染的 14 个字段**可从面板编辑；`promptLocale`/`diagnosticsFile` 值保留但不在页面里（需要时改 profile `cordis.patch.yml`）。这是有意的：用户需求只要求“触发阈值 + 精简模型”可改，高级字段避免面板过载。
+- row 的 locale description 会让原生 summary seat 不渲染（`description ?? renderSlot(...)`），因此配置页验收以 **page 视图**为准；summary 代码保留但非验收点。

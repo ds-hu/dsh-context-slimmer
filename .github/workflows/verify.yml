@@ -117,8 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           bash -n scripts/ci/*.sh
-          node --check scripts/ci/assert-slimming.mjs
-          node --check scripts/ci/screenshot.mjs
+          for file in scripts/ci/*.mjs; do node --check "$file"; done
           node scripts/ci/assert-slimming.mjs --self-test --allow-builtin-fold
 
       - name: Dry-run the CI helpers
@@ -128,6 +127,9 @@ jobs:
             bash scripts/ci/prepare-profile.sh --dry-run
           DSH_HOME="$RUNNER_TEMP/dsh-home-dry" CI_ARTIFACTS_DIR="$RUNNER_TEMP/ci-artifacts-dry" \
             bash scripts/ci/run-scenario.sh --dry-run
+          CI_ARTIFACTS_DIR="$RUNNER_TEMP/ci-artifacts-dry" node scripts/ci/benchmark.mjs --dry-run
+          CI_ARTIFACTS_DIR="$RUNNER_TEMP/ci-artifacts-dry" node scripts/ci/benchmark.mjs --self-test
+          CI_ARTIFACTS_DIR="$RUNNER_TEMP/ci-artifacts-dry" node scripts/ci/screenshot.mjs --dry-run
 
       - name: Validate workflow YAML
         run: |
@@ -178,6 +180,8 @@ jobs:
       DSH_VERSION_INPUT: ${{ inputs.dsh_version || '' }}
       SLIMMER_UI_TEXT: 已精简工具调用结果
       SLIMMER_PLUGIN_NAME: Context Slimmer,上下文精简器
+      SLIMMER_PLUGIN_ROW_TITLES: 上下文精简器,context-slimmer-tool-result
+      SLIMMER_CONFIG_SELECTORS: '[data-ctxslim-config],[data-field="everyNToolCalls"],[data-field="model.provider"],[data-field="model.maxOutputTokens"],[data-field*="reasoningEffort"],[data-ctxslim-save]'
       INCLUDE_WEB_SEARCH: ${{ github.event_name == 'workflow_dispatch' && inputs.include_web_search == false && '0' || '1' }}
       ENABLE_SCREENSHOTS: ${{ github.event_name == 'workflow_dispatch' && inputs.screenshot == false && '0' || '1' }}
     steps:
@@ -251,8 +255,16 @@ jobs:
           bash scripts/ci/prepare-profile.sh --profile ci-headless --template headless --probe-model
 
       - name: Prepare web profile for screenshots
+        env:
+          # The panel config page renders the same conservative v0.2.0 config.
+          SLIMMER_CONFIG_JSON_INPUT: ${{ inputs.slimmer_config }}
         run: |
           set -euo pipefail
+          config="${SLIMMER_CONFIG_JSON_INPUT:-}"
+          if [ -z "$config" ]; then
+            config="$(cat scripts/ci/slimmer-config.default.json)"
+          fi
+          export SLIMMER_CONFIG_JSON="$config"
           bash scripts/ci/prepare-profile.sh --profile ci-web --template web --no-probe-model
 
       - name: Run one real headless session
@@ -269,6 +281,8 @@ jobs:
           node scripts/ci/assert-slimming.mjs \
             --session-log "$VERIFY_SESSION_JSONL" \
             --json-stream "${SCENARIO_JSON:-$CI_ARTIFACTS_DIR/scenario.jsonl}" \
+            --diagnostics "${SLIMMER_DIAGNOSTICS_FILE:-$CI_ARTIFACTS_DIR/slimmer-diagnostics.jsonl}" \
+            --require-no-subagents \
             --min-replacements 1 \
             --min-savings-chars 256 \
             --min-reduction-ratio 0.2

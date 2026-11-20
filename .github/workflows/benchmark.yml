@@ -1,0 +1,187 @@
+# v0.2.0 benchmark: conservative non-inferiority demo (issue #2).
+#
+# Runs one deterministic composite session per mode — baseline (plugin
+# disabled), conservative (v0.2.0 default policy) and aggressive (v0.1 lossy
+# control, report-only) — and asserts:
+#   * baseline and conservative pass all 5 answer checkpoints (5/5);
+#   * conservative folded tool text is smaller than baseline;
+#   * conservative performed at least one drop and its planner was never
+#     truncated (`planner-truncated`);
+#   * aggressive is reported but not gated.
+#
+# The paid job needs DEEPSEEK_API_KEY; the secret availability gate mirrors
+# verify.yml. Cost: one composite session per mode (~¥0.1–0.2 each; R=1 total
+# well under ¥1, R=3 still within the documented envelope).
+name: benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      repetitions:
+        description: Repetitions per mode (1 = push smoke, 3 = release evidence)
+        required: false
+        type: number
+        default: 1
+      model:
+        description: Model id override (empty = probe /models and prefer deepseek-flash)
+        required: false
+        type: string
+        default: ''
+      dsh_version:
+        description: Exact @deepseek-ai/dsh version (empty = derive from the repo engine range)
+        required: false
+        type: string
+        default: ''
+      node_version:
+        description: Node.js major version (dsh requires >=24.9.0)
+        required: false
+        type: string
+        default: '24'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/ci/benchmark.mjs'
+      - 'scripts/ci/benchmark-scenario.md'
+      - 'scripts/ci/bench/**'
+      - 'scripts/ci/slimmer-config.default.json'
+      - 'scripts/ci/prepare-profile.sh'
+      - 'scripts/ci/run-scenario.sh'
+      - '.github/workflows/benchmark.yml'
+      - 'packages/core/**'
+      - 'packages/tool-result-slimmer/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: 'true'
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  gate:
+    name: secret availability gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_secret: ${{ steps.check.outputs.has_secret }}
+    steps:
+      - name: Check DEEPSEEK_API_KEY availability
+        id: check
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+            echo "has_secret=true" >> "$GITHUB_OUTPUT"
+            echo "DEEPSEEK_API_KEY is available; the paid benchmark job will run."
+          else
+            echo "has_secret=false" >> "$GITHUB_OUTPUT"
+            echo "DEEPSEEK_API_KEY is not available (fork PR or missing secret); skipping the paid benchmark job."
+          fi
+
+  benchmark:
+    name: benchmark (baseline / conservative / aggressive)
+    needs: gate
+    if: needs.gate.outputs.has_secret == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CI_ARTIFACTS_DIR: /tmp/ci-artifacts
+      CI_ENV_FILE: /tmp/ci-env.sh
+      DSH_HOME: /tmp/dsh-home
+      DSH_TEST_MODEL: ${{ inputs.model || '' }}
+      DSH_VERSION_INPUT: ${{ inputs.dsh_version || '' }}
+      BENCHMARK_REPETITIONS: ${{ inputs.repetitions || 1 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version || '24' }}
+
+      - name: Cache npm cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      - name: Install workspace dependencies
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            echo "no package-lock.json yet; falling back to npm install"
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Pin and install dsh
+        run: |
+          set -euo pipefail
+          version="${DSH_VERSION_INPUT:-$(node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const pick = (deps) => deps && (deps["@deepseek-ai/dsh"] ?? deps["@deepseek-ai/dsh-core"]);
+            const raw = pick(pkg.devDependencies) ?? pick(pkg.peerDependencies) ?? pick(pkg.dependencies);
+            const match = raw && String(raw).match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/);
+            console.log(match ? match[0] : "0.2.2-rc.1");
+          ')}"
+          echo "installing @deepseek-ai/dsh@${version}"
+          npm install -g "@deepseek-ai/dsh@${version}" --no-audit --no-fund
+          dsh --version
+          echo "DSH_VERSION_RESOLVED=${version}" >> "$GITHUB_ENV"
+
+      - name: Benchmark (hard gates)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$CI_ARTIFACTS_DIR"
+          node scripts/ci/benchmark.mjs \
+            --repetitions "${BENCHMARK_REPETITIONS:-1}" \
+            --write-doc
+
+      - name: Publish benchmark to the job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### v0.2.0 conservative benchmark"
+            echo
+            if [ -f "$CI_ARTIFACTS_DIR/benchmark-summary.md" ]; then
+              cat "$CI_ARTIFACTS_DIR/benchmark-summary.md"
+            else
+              echo "_No benchmark summary was produced (the run failed before the report step)._"
+            fi
+            if [ -f "$CI_ARTIFACTS_DIR/benchmark.md" ]; then
+              echo
+              echo "<details><summary>Full generated report (docs/benchmark.md)</summary>"
+              echo
+              cat "$CI_ARTIFACTS_DIR/benchmark.md"
+              echo
+              echo "</details>"
+            fi
+            if [ -f docs/benchmark.md ]; then
+              echo
+              echo "Generated docs/benchmark.md (uploaded as an artifact; commit it from the artifact when releasing)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-evidence-${{ github.run_id }}
+          path: |
+            /tmp/ci-artifacts
+            docs/benchmark.md
+          if-no-files-found: warn
+          retention-days: 14

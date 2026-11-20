@@ -34,6 +34,7 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -52,8 +53,9 @@ function parseArgs(argv) {
     minReplacements: 1,
     minSavingsChars: 256,
     minReductionRatio: 0.2,
-    legacyEventType: process.env.SLIMMER_EVENT_TYPE ?? LEGACY_EVENT_TYPE,
+    diagnostics: process.env.SLIMMER_DIAGNOSTICS_FILE ?? '',
     requireShadowPrice: true,
+    requireNoSubagents: process.env.SLIMMER_ALLOW_SUBAGENTS !== '1',
     maxUserMessages: 1,
     dshInstallRoot: process.env.DSH_INSTALL_ROOT ?? '',
     dshSessionSurface: process.env.DSH_SESSION_SURFACE ?? '',
@@ -81,6 +83,9 @@ function parseArgs(argv) {
       case '--min-reduction-ratio': args.minReductionRatio = Number(next()); break;
       case '--event-type': args.legacyEventType = next(); break;
       case '--max-user-messages': args.maxUserMessages = Number(next()); break;
+      case '--diagnostics': args.diagnostics = next(); break;
+      case '--allow-subagents': args.requireNoSubagents = false; break;
+      case '--require-no-subagents': args.requireNoSubagents = true; break;
       case '--require-shadow-price': args.requireShadowPrice = true; break;
       case '--no-require-shadow-price': args.requireShadowPrice = false; break;
       case '--dsh-install-root': args.dshInstallRoot = next(); break;
@@ -211,6 +216,57 @@ function normalizeStatus(record) {
   return raw.toLowerCase();
 }
 
+function diagnosticsKind(record) {
+  const value = record?.kind ?? record?.type ?? record?.event ?? record?.phase ?? record?.stage ?? '';
+  return typeof value === 'string' ? value.toLowerCase() : '';
+}
+
+function diagnosticsUsage(record) {
+  const candidates = [record?.usage, record?.data?.usage, record?.planner?.usage, record?.metrics?.usage];
+  for (const usage of candidates) {
+    if (usage === null || typeof usage !== 'object') continue;
+    const promptTokens = usage.promptTokens ?? usage.inputTokens;
+    const completionTokens = usage.completionTokens ?? usage.outputTokens;
+    if (typeof promptTokens === 'number' || typeof completionTokens === 'number') {
+      return { promptTokens: Number(promptTokens ?? 0), completionTokens: Number(completionTokens ?? 0) };
+    }
+  }
+  return undefined;
+}
+
+function diagnosticsDuration(record) {
+  const value = record?.durationMs ?? record?.duration ?? record?.elapsedMs ?? record?.data?.durationMs ?? record?.planner?.durationMs;
+  return typeof value === 'number' ? value : undefined;
+}
+
+function diagnosticsFinishReason(record) {
+  const value = record?.finishReason ?? record?.finish_reason ?? record?.finish ?? record?.stopReason
+    ?? record?.data?.finishReason ?? record?.planner?.finishReason;
+  if (typeof value === 'string') return value;
+  return undefined;
+}
+
+function diagnosticsIsTruncation(record) {
+  const kind = diagnosticsKind(record);
+  if (kind.includes('planner-truncated') || kind.includes('truncated')) return true;
+  const finish = diagnosticsFinishReason(record);
+  if (typeof finish === 'string' && /^(max[-_]?tokens|length|token[-_]?limit)$/i.test(finish) && /plan|apply|result|activation/.test(kind)) return true;
+  const serialized = JSON.stringify(record);
+  return serialized.includes('planner-truncated') || serialized.includes('planner_truncated');
+}
+
+function parseDiagnostics(path) {
+  if (!existsSync(path)) {
+    fail(`diagnostics file does not exist: ${path} (the v0.2 planner must write plan/apply diagnostics)`);
+  }
+  const lines = readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '');
+  const records = [];
+  for (const line of lines) {
+    try { records.push(JSON.parse(line)); } catch { /* ignore a torn final line */ }
+  }
+  return { records };
+}
+
 function parseStreamToolResultIds(streamPath) {
   if (!streamPath || !existsSync(streamPath)) return undefined;
   const ids = [];
@@ -250,6 +306,14 @@ async function evaluate(events, header, args, options) {
     header ? `session ${header.id}` : 'missing session header event');
   add('tool-activity', toolCalls.length >= 1 && toolResults.length >= 2,
     `${toolCalls.length} tool/call, ${toolResults.length} tool/result events (includes replacement results)`);
+
+  // ---- check 0b: the v0.2 planner must not reappear as a hidden subagent -----
+  const subagentEvents = events.filter((event) => typeof event.type === 'string' && event.type.startsWith('subagent/'));
+  add('no-subagent-events', !args.requireNoSubagents || subagentEvents.length === 0,
+    subagentEvents.length === 0
+      ? 'no subagent/* events in the main session log (v0.2 planner is a direct LLM call)'
+      : `${subagentEvents.length} subagent/* event(s): ${JSON.stringify(subagentEvents.slice(0, 5).map((event) => event.type))} — the planner regression returned`,
+    args.requireNoSubagents);
 
   // ---- check 1: the plugin's prune extension (UI row source) ---------------
   // Protocol: the plugin records each slimming round as a `compaction/prune`
@@ -461,6 +525,54 @@ async function evaluate(events, header, args, options) {
   add('projected-tool-context-smaller', projectedToolChars < rawToolChars,
     `raw append tool-result text=${rawToolChars} chars, folded model-visible tool text=${projectedToolChars} chars`);
 
+  // ---- check 6: planner observability (v0.2 diagnostics) -------------------
+  // The v0.2 direct-LLM planner writes `plan`/`apply` diagnostics with usage,
+  // durationMs, finishReason, and records `planner-truncated` when the output
+  // budget ran out. A truncated planner is the v0.1.0 production regression.
+  const diagnostics = args.diagnostics ? parseDiagnostics(args.diagnostics) : undefined;
+  let plannerSummary = null;
+  if (diagnostics !== undefined) {
+    const records = diagnostics.records;
+    const kinds = records.map((record) => diagnosticsKind(record));
+    const truncations = records.filter((record) => diagnosticsIsTruncation(record));
+    const planRecords = records.filter((record) => /plan|apply|result|activation/.test(diagnosticsKind(record)));
+    // plan/validate/apply repeat the same planner usage; prefer the dedicated
+    // llm-result record so the aggregate counts one usage per planner call.
+    const llmResultRecords = records.filter((record) => /llm-result|llm_result/.test(diagnosticsKind(record)) && diagnosticsUsage(record) !== undefined);
+    const usageRecords = llmResultRecords.length > 0
+      ? llmResultRecords
+      : records.filter((record) => diagnosticsUsage(record) !== undefined);
+    const durations = records.map((record) => diagnosticsDuration(record)).filter((value) => typeof value === 'number');
+    const finishReasons = records.map((record) => diagnosticsFinishReason(record)).filter((value) => typeof value === 'string');
+    plannerSummary = {
+      file: args.diagnostics,
+      recordCount: records.length,
+      kinds: [...new Set(kinds)],
+      planRecords: planRecords.length,
+      usageRecords: usageRecords.length,
+      truncations: truncations.length,
+      truncationSamples: truncations.slice(0, 3).map((record) => JSON.stringify(record).slice(0, 300)),
+      usageSource: llmResultRecords.length > 0 ? 'llm-result' : 'plan/apply fallback',
+      promptTokens: usageRecords.reduce((sum, record) => sum + (diagnosticsUsage(record).promptTokens ?? 0), 0),
+      completionTokens: usageRecords.reduce((sum, record) => sum + (diagnosticsUsage(record).completionTokens ?? 0), 0),
+      durationMs: durations.reduce((sum, value) => sum + value, 0) || undefined,
+      finishReasons: [...new Set(finishReasons)],
+    };
+    add('planner-diagnostics-present', records.length > 0 && planRecords.length > 0,
+      records.length === 0
+        ? `diagnostics file is empty: ${args.diagnostics} (the v0.2 planner must write plan/apply records)`
+        : `${planRecords.length} plan/apply/result record(s) in ${records.length} diagnostics event(s): kinds=[${plannerSummary.kinds.join(', ')}]`);
+    add('no-planner-truncated', truncations.length === 0,
+      truncations.length === 0
+        ? `no planner-truncated record in ${records.length} diagnostics event(s); finishReasons=[${plannerSummary.finishReasons.join(', ')}]`
+        : `${truncations.length} planner truncation record(s): ${truncations.slice(0, 3).map((record) => JSON.stringify(record).slice(0, 240)).join(' | ')}`);
+    add('planner-observability', usageRecords.length > 0,
+      usageRecords.length > 0
+        ? `${usageRecords.length}/${planRecords.length} planner record(s) carry usage; promptTokens=${plannerSummary.promptTokens}, completionTokens=${plannerSummary.completionTokens}, durationMs=${plannerSummary.durationMs ?? '<missing>'}`
+        : 'no plan/apply diagnostics record carried planner usage (tokens/durationMs/finishReason); the v0.2 planner should log them',
+      false);
+  }
+
   const requiredFailed = checks.filter((check) => check.required && !check.ok);
   const report = {
     ok: requiredFailed.length === 0,
@@ -488,6 +600,8 @@ async function evaluate(events, header, args, options) {
       estimatedTokensSaved: Math.ceil(totalSavings / 4),
       bestReductionRatio: Number(bestRatio.toFixed(3)),
       appendTranscriptHash,
+      subagentEventCount: subagentEvents.length,
+      planner: plannerSummary,
     },
     checks,
     failures: requiredFailed.map((check) => `${check.id}: ${check.detail}`),
@@ -576,9 +690,48 @@ async function runSelfTest(args) {
     events: base.events.filter((event) => !isReplaceEvent(event) && event.type !== 'compaction/prune').map((event, index) => ({ ...event, seq: index })),
   };
   const negative = await evaluate(noReplacement.events, noReplacement.header, args, options);
+  const subagentFixture = {
+    header: base.header,
+    events: [...base.events, { time: 1, seq: base.events.length, type: 'subagent/catalog', data: { reason: 'selftest' } }],
+  };
+  const withSubagent = await evaluate(subagentFixture.events, subagentFixture.header, args, options);
   let ok = true;
   ok = assertSelfTestReport('positive fixture', positive, true) && ok;
   ok = assertSelfTestReport('negative fixture', negative, false) && ok;
+  if (args.requireNoSubagents) ok = assertSelfTestReport('subagent negative fixture', withSubagent, false) && ok;
+  // Diagnostics checks: healthy plan/apply records pass, a truncated planner
+  // record fails the required gate, and an empty diagnostics file fails too
+  // (a missing/empty file must not count as "no truncation").
+  const diagnosticsFile = join(tmpdir(), `assert-slimming-selftest-${process.pid}.jsonl`);
+  const diagnosticsRun = async (label, records) => {
+    writeFileSync(diagnosticsFile, records.map((record) => JSON.stringify(record)).join('\n') + (records.length > 0 ? '\n' : ''));
+    return evaluate(base.events, base.header, { ...args, diagnostics: diagnosticsFile }, options);
+  };
+  const healthy = await diagnosticsRun('healthy', [
+    { kind: 'trigger', observedCalls: 13 },
+    { kind: 'llm-result', finishReason: 'stop', durationMs: 4321, usage: { inputTokens: 100, outputTokens: 20 } },
+    { kind: 'plan', plan: { items: [] } },
+    { kind: 'apply', items: 1, charsSaved: 300 },
+  ]);
+  ok = assertSelfTestReport('diagnostics healthy fixture', healthy, true) && ok;
+  if (!(healthy.metrics?.planner?.promptTokens === 100 && healthy.metrics?.planner?.completionTokens === 20)) {
+    log('FAIL self-test diagnostics healthy fixture: planner usage metrics missing');
+    ok = false;
+  }
+  const truncated = await diagnosticsRun('truncated', [
+    { kind: 'planner-truncated', finishReason: 'max-tokens', durationMs: 120000, usage: { inputTokens: 100, outputTokens: 4096 } },
+  ]);
+  ok = assertSelfTestReport('diagnostics planner-truncated fixture', truncated, false) && ok;
+  if (!(truncated.failures ?? []).some((failure) => failure.startsWith('no-planner-truncated'))) {
+    log('FAIL self-test diagnostics planner-truncated fixture: no-planner-truncated did not fail');
+    ok = false;
+  }
+  const empty = await diagnosticsRun('empty', []);
+  ok = assertSelfTestReport('diagnostics empty fixture', empty, false) && ok;
+  if (!(empty.failures ?? []).some((failure) => failure.startsWith('planner-diagnostics-present'))) {
+    log('FAIL self-test diagnostics empty fixture: planner-diagnostics-present did not fail');
+    ok = false;
+  }
   await loadSurfaceModule(args);
   const fallback = await evaluate(base.events, base.header, args, { useInstalledFold: false, sessionLog: '<self-test>' });
   ok = assertSelfTestReport('builtin-fold fixture', fallback, true) && ok;
@@ -602,6 +755,7 @@ async function main() {
     log(`  json stream: ${args.jsonStream || '<missing>'}`);
     log('  protocol:    compaction/prune data.contextSlimmer (role=summary) + tool/result surface replace');
     log(`  artifacts:   ${args.artifactsDir}`);
+    log(`  diagnostics: ${args.diagnostics || '<not provided: planner truncation check skipped>'}`);
     log(`  thresholds:  replacements>=${args.minReplacements}, savings>=${args.minSavingsChars} chars, best reduction>=${args.minReductionRatio}`);
     const modulePath = resolveSurfaceModule(args);
     log(`  fold: ${modulePath ? `dsh-session/surface at ${modulePath}` : 'builtin fallback (installed dsh not found)'}`);

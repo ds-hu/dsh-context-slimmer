@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Tool-result slimmer",
-    "description": "A background fork subagent periodically reviews stale tool results: successful and relevant content stays byte-identical, wholly irrelevant or recoverable results are dropped, redundant parts are trimmed, and failure evidence is kept. The main agent only sees the slimmed results, the chat transcript keeps the original tool cards, and one extra row reports what was slimmed."
+    "title": "Tool result slimmer",
+    "description": "Periodically removes provably-safe stale tool results (duplicate copies, failed attempts superseded by later successes, information-free output) under the conservative policy: drops only, never rewrites content, and keeps anything it cannot prove safe. The planner calls the current model directly, creates no subagent, and does not change the main agent's tool list. The chat transcript keeps the original tool cards and adds one row reporting what was slimmed. Sampling thresholds, the slimming policy, and the model override are editable in the native Plugins panel and apply live."
   }
 }

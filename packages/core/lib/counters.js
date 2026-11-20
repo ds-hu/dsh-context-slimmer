@@ -61,26 +61,28 @@ export function noteToolResult(counter, sample = {}) {
 /**
  * Whether the configured trigger condition is met.
  *
- * `everyNToolCalls` and `minChars` are independent OR-conditions; `0` disables
- * that branch. `triggerOnErrorOnly` additionally requires at least one failed
- * result in the window.
+ * v0.2.0 (docs/plan-v0.2.md §3): the two thresholds are AND-conditions — a run
+ * fires only when BOTH the result count AND the character count reached their
+ * configured limits, so calm sessions never fire on one dimension alone. A
+ * threshold of 0 disables that condition (vacuously true), and
+ * `triggerOnErrorOnly` additionally requires at least one failed result in the
+ * window.
  *
  * @param {object} counter Counter state.
  * @param {object} config Trigger configuration.
- * @param {number} config.everyNToolCalls Result-count threshold (`0` disables).
- * @param {number} config.minChars Character threshold (`0` disables).
+ * @param {number} config.everyNToolCalls Result-count threshold (`0` disables this condition).
+ * @param {number} config.minChars Character threshold (`0` disables this condition).
  * @param {boolean} [config.triggerOnErrorOnly] Require a failed result.
- * @returns {{ triggered: boolean, reason: 'calls' | 'chars' | null }} Decision.
+ * @returns {{ triggered: boolean, reason: 'both' | 'calls' | 'chars' | null }} Decision.
  */
 export function shouldTrigger(counter, config) {
   const errorGate = config.triggerOnErrorOnly === true && counter.observedErrorCalls === 0
-  if (config.everyNToolCalls > 0 && counter.observedCalls >= config.everyNToolCalls && !errorGate) {
-    return { triggered: true, reason: 'calls' }
-  }
-  if (config.minChars > 0 && counter.observedChars >= config.minChars && !errorGate) {
-    return { triggered: true, reason: 'chars' }
-  }
-  return { triggered: false, reason: null }
+  const callsConfigured = config.everyNToolCalls > 0
+  const charsConfigured = config.minChars > 0
+  const callsOk = !callsConfigured || counter.observedCalls >= config.everyNToolCalls
+  const charsOk = !charsConfigured || counter.observedChars >= config.minChars
+  if (errorGate || !callsOk || !charsOk) return { triggered: false, reason: null }
+  return { triggered: true, reason: callsConfigured && charsConfigured ? 'both' : callsConfigured ? 'calls' : 'chars' }
 }
 
 /**

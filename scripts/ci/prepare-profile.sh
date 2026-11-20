@@ -9,7 +9,9 @@
 #   * makes session logs plain JSONL (`compression: none`) for artifact upload,
 #   * disables the built-in compaction/pruner/title LLM rows so the build-in-test
 #     plugin's own events are the only compression evidence,
-#   * configures the plugin under test (`SLIMMER_CONFIG_JSON`).
+#   * configures the plugin under test (`SLIMMER_CONFIG_JSON`, v0.2.0
+#     conservative defaults: policy/everyNToolCalls/minChars/protectRecent and
+#     the planner model inherit settings).
 #
 # Everything lives under a temp `DSH_HOME`; the user's real profile is never
 # touched and no registry install or model API call happens here except the
@@ -47,7 +49,7 @@ ALLOW_UNLISTED_MODEL="${ALLOW_UNLISTED_MODEL:-0}"
 # brace-containing default even when the variable is set, corrupting the JSON.
 SLIMMER_CONFIG_JSON="${SLIMMER_CONFIG_JSON-}"
 if [[ -z "$SLIMMER_CONFIG_JSON" ]]; then
-  SLIMMER_CONFIG_JSON='{"enabled":true,"everyNToolCalls":3,"minChars":0,"protectRecent":1,"maxTargets":6,"minTargetChars":0,"timeoutMs":180000,"forkProvider":"fork","promptLocale":"zh","model":{"provider":"inherit"}}'
+  SLIMMER_CONFIG_JSON='{"enabled":true,"policy":"conservative","everyNToolCalls":12,"minChars":24000,"protectRecent":3,"minTargetChars":4096,"maxTargets":4,"timeoutMs":180000,"includeSubagents":true,"triggerOnErrorOnly":false,"promptLocale":"zh","model":{"provider":"inherit"},"diagnosticsFile":"/tmp/ci-artifacts/slimmer-diagnostics.jsonl"}'
 fi
 SLIMMER_ENTRY_IDS="${SLIMMER_ENTRY_IDS:-}"
 SLIMMER_ENTRY_ID_REGEX="${SLIMMER_ENTRY_ID_REGEX:-}"

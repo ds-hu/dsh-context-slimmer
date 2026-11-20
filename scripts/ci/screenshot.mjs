@@ -43,6 +43,10 @@ function parseArgs(argv) {
     requireSession: process.env.SLIMMER_REQUIRE_SESSION === '1',
     details: process.env.SLIMMER_DETAIL_SCREENSHOT !== '0',
     pluginsPanel: process.env.SLIMMER_PLUGINS_PANEL !== '0',
+    pluginConfig: process.env.SLIMMER_PLUGIN_CONFIG !== '0',
+    configSelectors: (process.env.SLIMMER_CONFIG_SELECTORS
+      ?? '[data-ctxslim-config],[data-field="everyNToolCalls"],[data-field="model.provider"],[data-field="model.maxOutputTokens"],[data-field*="reasoningEffort"],[data-ctxslim-save]').split(','),
+    pluginRowTitles: (process.env.SLIMMER_PLUGIN_ROW_TITLES ?? '上下文精简器,context-slimmer-tool-result').split(','),
     dryRun: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -66,6 +70,9 @@ function parseArgs(argv) {
       case '--require-session': args.requireSession = true; break;
       case '--no-details': args.details = false; break;
       case '--no-plugins-panel': args.pluginsPanel = false; break;
+      case '--no-plugin-config': args.pluginConfig = false; break;
+      case '--config-selectors': args.configSelectors = next().split(','); break;
+      case '--plugin-row-title': args.pluginRowTitles = next().split(','); break;
       case '--dry-run': args.dryRun = true; break;
       case '-h': case '--help':
         process.stdout.write('see the header of scripts/ci/screenshot.mjs for usage\n');
@@ -312,6 +319,126 @@ async function uiTextPresent(page, text) {
   }, text).catch(() => false);
 }
 
+
+/**
+ * The v0.2.0 planner is a direct LLM call, so the Web UI must not show the
+ * "N 个子智能体" counter (its data source is the subagent catalog projection).
+ *
+ * @param {import('playwright').Page} page Browser page.
+ * @returns {Promise<{status: string, matches: string[]}>} Counter evidence.
+ */
+async function inspectSubagentCounter(page) {
+  const evidence = await page.evaluate(() => {
+    const body = document.body;
+    const text = body?.innerText ?? '';
+    const matches = [];
+    const pattern = /(\d+)\s*个子智能体/g;
+    let match;
+    while ((match = pattern.exec(text)) !== null) matches.push(match[0]);
+    const textOccurrences = (text.match(/个子智能体/g) ?? []).length;
+    return { matches, textOccurrences };
+  }).catch(() => ({ matches: [], textOccurrences: 0 }));
+  const matches = evidence.matches ?? [];
+  const textOccurrences = evidence.textOccurrences ?? 0;
+  if (matches.length === 0) {
+    return textOccurrences === 0
+      ? { status: 'absent', matches: [], textOccurrences }
+      : { status: 'text-present', matches: [], textOccurrences };
+  }
+  const nonzero = matches.filter((value) => Number(value.match(/\d+/)?.[0] ?? 0) > 0);
+  return { status: nonzero.length === 0 ? 'zero' : 'present', matches, textOccurrences };
+}
+
+/**
+ * Open the native Plugins panel -> installed bundle detail -> module row detail
+ * and assert the config form fields contributed by the v0.2.0 client half.
+ *
+ * @param {import('playwright').Page} page Browser page.
+ * @param {object} args Parsed CLI args.
+ * @param {object} report Screenshot report (mutated).
+ */
+async function capturePluginConfig(page, args, report) {
+  const selectors = args.configSelectors.map((selector) => selector.trim()).filter(Boolean);
+  const found = new Map(selectors.map((selector) => [selector, 0]));
+  const countSelectors = async () => {
+    for (const selector of selectors) {
+      found.set(selector, await page.locator(selector).count().catch(() => 0));
+    }
+    return [...found.values()].every((count) => count > 0);
+  };
+
+  // 1) open the installed bundle's detail page from the plugins list.
+  const pluginsButton = page.getByRole('button', { name: /Plugins|插件/i }).first();
+  if (!(await pluginsButton.isVisible().catch(() => false))) {
+    report.pluginConfig = { status: 'plugins-button-missing', selectors: [], screenshot: null };
+    return;
+  }
+  if (!(await page.locator('[data-plugin-detail]').count().catch(() => 0))) {
+    const namePattern = new RegExp(args.pluginNames.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'));
+    // Prefer the installed-bundle card hook, then fall back to the title text.
+    const card = page.locator('[data-plugin-package]').filter({ hasText: namePattern }).first();
+    const target = (await card.count().catch(() => 0)) > 0 ? card : page.getByText(namePattern).first();
+    if (await target.isVisible().catch(() => false)) {
+      await target.click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(1200);
+    }
+  }
+  const detailAvailable = await page.locator('[data-plugin-detail]').first().waitFor({ state: 'visible', timeout: 8000 }).then(() => true).catch(() => false);
+  if (!detailAvailable) {
+    report.pluginConfig = { status: 'bundle-detail-missing', selectors: [], screenshot: null };
+    warn('plugins bundle detail did not open; plugin config screenshot skipped');
+    return;
+  }
+
+  // 2) open the module row detail (the row carries data-plugin-row).
+  const rowOpen = page.locator('[data-plugin-row]').first();
+  if (await rowOpen.count().catch(() => 0)) {
+    const rowButton = rowOpen.locator('button').first();
+    const clicked = await rowButton.click({ timeout: 5000 }).then(() => true).catch(() => false);
+    if (!clicked) await rowOpen.click({ timeout: 5000, force: true }).catch(() => {});
+    await page.waitForTimeout(1200);
+  }
+  let rowDetail = page.locator('[data-plugin-row-detail]').first();
+  if (!(await rowDetail.count().catch(() => 0))) {
+    // Fallback: click the localized module row title.
+    for (const title of args.pluginRowTitles) {
+      const hit = page.getByText(title, { exact: false }).first();
+      if (await hit.isVisible().catch(() => false)) {
+        await hit.click({ timeout: 4000 }).catch(() => {});
+        await page.waitForTimeout(1200);
+        rowDetail = page.locator('[data-plugin-row-detail]').first();
+        if (await rowDetail.count().catch(() => 0)) break;
+      }
+    }
+  }
+  const hasConfig = await page.locator('[data-ctxslim-config]').count().catch(() => 0);
+  const configStatus = await page.locator('[data-ctxslim-config]').first().getAttribute('data-ctxslim-status').catch(() => null);
+  const configNoForm = (await page.locator('[data-ctxslim-config] [data-ctxslim-no-form], [data-ctxslim-no-form]').count().catch(() => 0)) > 0;
+  const allDataFields = await page.evaluate(() => [...document.querySelectorAll('[data-field]')].map((node) => node.getAttribute('data-field')).filter(Boolean)).catch(() => []);
+  const selectorsOk = await countSelectors();
+  const missing = [...found.entries()].filter(([, count]) => count === 0).map(([selector]) => selector);
+  const status = hasConfig > 0 && missing.length === 0
+    ? 'found'
+    : hasConfig === 0
+      ? 'config-form-missing'
+      : 'fields-missing';
+  report.pluginConfig = {
+    status,
+    hasRowDetail: (await page.locator('[data-plugin-row-detail]').count().catch(() => 0)) > 0,
+    configStatus,
+    configNoForm,
+    dataFields: allDataFields,
+    selectors: [...found.entries()].map(([selector, count]) => ({ selector, count })),
+    missing,
+  };
+  await page.screenshot({ path: join(args.artifactsDir, 'verify-plugin-config.png'), fullPage: true }).catch(() => {});
+  report.screenshots.push('verify-plugin-config.png');
+  report.pluginConfig.screenshot = 'verify-plugin-config.png';
+  if (status !== 'found') warn(`plugin config form incomplete (${status}); missing: ${missing.join(', ') || '<form selector>'}`);
+  else log('plugin config form found (all v0.2.0 fields present)');
+  void selectorsOk;
+}
+
 async function main() {
   let args;
   try { args = parseArgs(process.argv.slice(2)); } catch (error) { die(error.message); }
@@ -324,6 +451,8 @@ async function main() {
     locale: args.locale,
     screenshots: [],
     pluginsPanel: { status: 'not-run', matchedName: null },
+    pluginConfig: { status: 'not-run', selectors: [], screenshot: null },
+    subagentCounter: { status: 'not-run', matches: [], textOccurrences: 0 },
     consoleErrors: [],
     pageErrors: [],
     notes: [],
@@ -336,7 +465,9 @@ async function main() {
     log(`  session id: ${args.sessionId || '<missing: pass --session-id>'}`);
     log(`  ui text: ${args.uiText} (timeout ${args.uiTextTimeoutMs}ms, non-fatal=${!args.failOnMissingUiText})`);
     log(`  locale: ${args.locale}`);
-    log(`  screenshots: verify-chat-zh.png${args.details ? ', verify-chat-detail.png' : ''}${args.pluginsPanel ? ', verify-plugins.png' : ''}`);
+    log(`  screenshots: verify-chat-zh.png${args.details ? ', verify-chat-detail.png' : ''}${args.pluginsPanel ? ', verify-plugins.png' : ''}${args.pluginConfig ? ', verify-plugin-config.png' : ''}`);
+    log(`  config selectors: ${args.configSelectors.join(' ')}`);
+    log('  subagent counter check: N 个子智能体 must be absent');
     const playwright = await loadPlaywright();
     if (!playwright) {
       warn('playwright is not installed in this shell; the workflow installs it before this step');
@@ -558,6 +689,17 @@ async function main() {
     }
   }
 
+  report.subagentCounter = await inspectSubagentCounter(page);
+  if (report.subagentCounter.status === 'present') {
+    report.notes.push(`Web UI still shows a subagent counter: ${JSON.stringify(report.subagentCounter.matches)} (v0.2.0 planner must not create subagents)`);
+    warn('Web UI shows a "N 个子智能体" counter; the v0.2.0 direct-LLM planner must not create subagents');
+  } else if (report.subagentCounter.status === 'zero') {
+    report.notes.push('Web UI subagent counter is visible but zero: ' + JSON.stringify(report.subagentCounter.matches));
+  } else if (report.subagentCounter.status === 'text-present') {
+    report.notes.push('Web UI contains 「个子智能体」 text without a counter; the v0.2.0 direct-LLM planner should not surface subagents');
+    warn('Web UI contains 「个子智能体」 text');
+  }
+
   const chatPath = join(args.artifactsDir, 'verify-chat-zh.png');
   await page.screenshot({ path: chatPath, fullPage: true }).catch((error) => warn(`chat screenshot failed: ${error.message}`));
   report.screenshots.push('verify-chat-zh.png');
@@ -623,6 +765,14 @@ async function main() {
       report.pluginsPanel = { status: 'error', matchedName: null };
       warn(`plugins panel capture failed: ${error.message}`);
     }
+    if (args.pluginConfig && report.pluginsPanel.status !== 'button-missing') {
+      try {
+        await capturePluginConfig(page, args, report);
+      } catch (error) {
+        report.pluginConfig = { status: 'error', selectors: [], screenshot: null };
+        warn(`plugin config capture failed: ${error.message}`);
+      }
+    }
   }
 
   await browser.close().catch(() => {});
@@ -631,7 +781,7 @@ async function main() {
   mkdirSync(args.artifactsDir, { recursive: true });
   writeFileSync(join(args.artifactsDir, 'screenshot-report.json'), JSON.stringify(report, undefined, 2) + '\n');
   log(`screenshots: ${report.screenshots.join(', ') || '<none>'}`);
-  log(`ui_assert_status: ${report.ui_assert_status}; plugins: ${report.pluginsPanel.status}; session: ${report.session?.status}`);
+  log(`ui_assert_status: ${report.ui_assert_status}; plugins: ${report.pluginsPanel.status}; pluginConfig: ${report.pluginConfig.status}; subagents: ${report.subagentCounter.status}; session: ${report.session?.status}`);
   log(`report: ${join(args.artifactsDir, 'screenshot-report.json')}`);
 
   if (args.failOnMissingUiText && !uiTextFound) {

@@ -73,6 +73,12 @@ window.__ModuleLoader__.load({
     /** Keyed Chat renderer slot declared by `@deepseek-ai/dsh-client-ui-chat`. */
     const CHAT_NODE_SLOT = 'conversation.chat.node';
 
+    /** Keyed configuration slot declared by the native Plugins page. */
+    const PLUGIN_CONFIG_SLOT = 'plugins.row.config';
+
+    /** `<bundle package>#<row id>`: the key `rowConfigKey()` composes for our row. */
+    const PLUGIN_CONFIG_KEY = '@ds-hu/dsh-context-slimmer#context-slimmer-tool-result';
+
     /** Stylesheet ownership id (also the client-modules eviction marker). */
     const CSS_ID = PACKAGE_ID + '/SlimRow.css';
 
@@ -280,6 +286,64 @@ window.__ModuleLoader__.load({
       'item.unknownTool': '工具',
       'item.chars': '{before}→{after}',
       'item.charsMissing': '字符数未知',
+      'config.loading': '正在加载配置…',
+      'config.unavailable': '配置不可用（当前部署未提供该行配置）',
+      'config.readOnly': '当前部署为只读，配置无法保存。',
+      'config.save': '保存',
+      'config.saving': '保存中…',
+      'config.saved': '已保存',
+      'config.failed': '保存失败：Host 未接受这些值，已保留供你修改。',
+      'config.dirty': '有未保存的修改',
+      'config.invalidNumber': '请输入整数。',
+      'config.invalidRange': '请输入 {min} 到 {max} 之间的整数。',
+      'config.modelPair': '模型 provider 与 model 必须同时填写，或同时留空（inherit）。',
+      'config.invalidPolicy': '请选择有效策略。',
+      'config.summary.disabled': '已停用',
+      'config.summary.calls': '每 {count} 次调用',
+      'config.summary.modelInherit': '模型跟随当前 Agent',
+      'config.summary.model': '模型 {model}',
+      'config.policySuffix': '策略',
+      'config.enabled.label': '启用工具结果精简',
+      'config.enabled.hint': '关闭后该模块仍挂载，但不监听事件、不触发精简。',
+      'config.everyNToolCalls.label': '触发阈值：新增工具调用数',
+      'config.everyNToolCalls.hint': '自上次精简以来新增的工具结果达到该数量时考虑触发（1–200）。',
+      'config.minChars.label': '触发阈值：新增字符数',
+      'config.minChars.hint': '新增工具结果字符数达到该值时考虑触发；与调用数阈值同时满足才会触发。',
+      'config.protectRecent.label': '保护最近结果数',
+      'config.protectRecent.hint': '最新的 N 条工具结果永不作为精简目标（0–50）。',
+      'config.minTargetChars.label': '最小目标字符数',
+      'config.minTargetChars.hint': '短于该字符数的结果不会被改写，避免无收益替换。',
+      'config.maxTargets.label': '单批最大目标数',
+      'config.maxTargets.hint': '一次精简最多改写的结果条数（1–20）。',
+      'config.policy.label': '精简策略',
+      'config.policy.hint': '保守：仅删除重复、被覆盖或空输出；均衡：允许有限裁剪；激进：有损模式。',
+      'config.policy.conservative': '保守',
+      'config.policy.balanced': '均衡',
+      'config.policy.aggressive': '激进',
+      'config.includeSubagents.label': '同时精简子 Agent 会话',
+      'config.includeSubagents.hint': '开启后子 Agent 的工具结果也按相同规则精简。',
+      'config.triggerOnErrorOnly.label': '仅含失败时触发',
+      'config.triggerOnErrorOnly.hint': '观测窗口中至少有一条失败的调用时才触发，适合嘈杂的长构建。',
+      'config.timeoutMs.label': '单次精简超时（毫秒）',
+      'config.timeoutMs.hint': '1000–600000；超时则不落地任何替换。',
+      'config.model.provider.label': '模型 provider',
+      'config.model.provider.hint': '留空表示跟随当前 Agent（inherit）。',
+      'config.model.model.label': '模型 id',
+      'config.model.model.hint': '留空表示跟随当前 Agent（inherit）；与 provider 需同时填写。',
+      'config.model.maxOutputTokens.label': '输出 token 上限',
+      'config.model.maxOutputTokens.hint': '0 表示交给路由决定。',
+      'config.model.placeholder': 'inherit（跟随当前 Agent）',
+      'config.noForm': '该模块没有可编辑的 Host 配置（Host Config 需声明 .volatile() 字段）。',
+      'config.failedRefresh': '保存被拒绝：配置可能已在别处更新，页面已刷新，请重试。',
+      'config.invalidOption': '请选择有效选项。',
+      'config.model.reasoningEffort.label': '推理强度',
+      'config.model.reasoningEffort.hint': '跟随当前 Agent 时使用主会话的推理强度。',
+      'config.reasoning.inherit': '跟随当前 Agent',
+      'config.reasoning.off': '关闭',
+      'config.reasoning.low': '低',
+      'config.reasoning.medium': '中',
+      'config.reasoning.high': '高',
+      'config.reasoning.max': '最高',
     });
 
     /** English row copy (the fallback locale for every other UI language). */
@@ -298,6 +362,64 @@ window.__ModuleLoader__.load({
       'item.unknownTool': 'tool',
       'item.chars': '{before}→{after}',
       'item.charsMissing': 'chars unknown',
+      'config.loading': 'Loading configuration…',
+      'config.unavailable': 'Configuration unavailable (this deployment does not expose this row).',
+      'config.readOnly': 'This deployment is read-only; changes cannot be saved.',
+      'config.save': 'Save',
+      'config.saving': 'Saving…',
+      'config.saved': 'Saved',
+      'config.failed': 'Save failed: the Host did not accept these values; they are kept for you to correct.',
+      'config.dirty': 'Unsaved changes',
+      'config.invalidNumber': 'Enter an integer.',
+      'config.invalidRange': 'Enter an integer between {min} and {max}.',
+      'config.modelPair': 'Model provider and model must both be set, or both be left empty (inherit).',
+      'config.invalidPolicy': 'Choose a valid policy.',
+      'config.summary.disabled': 'Disabled',
+      'config.summary.calls': 'Every {count} tool calls',
+      'config.summary.modelInherit': 'Model follows the current Agent',
+      'config.summary.model': 'Model {model}',
+      'config.policySuffix': '',
+      'config.enabled.label': 'Enable tool-result slimming',
+      'config.enabled.hint': 'When off the module stays mounted but installs no listener and never runs a slim pass.',
+      'config.everyNToolCalls.label': 'Trigger: new tool calls',
+      'config.everyNToolCalls.hint': 'Consider a pass once this many new tool results accumulated since the last run (1–200).',
+      'config.minChars.label': 'Trigger: new characters',
+      'config.minChars.hint': 'Consider a pass once this many new tool-result characters accumulated; both triggers must be met.',
+      'config.protectRecent.label': 'Protected recent results',
+      'config.protectRecent.hint': 'The newest N tool results are never rewritten (0–50).',
+      'config.minTargetChars.label': 'Minimum target characters',
+      'config.minTargetChars.hint': 'Results shorter than this are never rewritten; a rewrite there saves nothing.',
+      'config.maxTargets.label': 'Maximum targets per pass',
+      'config.maxTargets.hint': 'At most this many results are rewritten per pass (1–20).',
+      'config.policy.label': 'Slimming policy',
+      'config.policy.hint': 'Conservative: drop only duplicates, superseded results, or empty output. Balanced: limited trimming. Aggressive: lossy.',
+      'config.policy.conservative': 'Conservative',
+      'config.policy.balanced': 'Balanced',
+      'config.policy.aggressive': 'Aggressive',
+      'config.includeSubagents.label': 'Slim subagent sessions too',
+      'config.includeSubagents.hint': 'When on, subagent tool results are slimmed under the same rules.',
+      'config.triggerOnErrorOnly.label': 'Only when something failed',
+      'config.triggerOnErrorOnly.hint': 'Only run a pass when the window contains at least one failed tool result.',
+      'config.timeoutMs.label': 'Pass timeout (ms)',
+      'config.timeoutMs.hint': '1000–600000; on timeout nothing is replaced.',
+      'config.model.provider.label': 'Model provider',
+      'config.model.provider.hint': 'Leave empty to follow the current Agent (inherit).',
+      'config.model.model.label': 'Model id',
+      'config.model.model.hint': 'Leave empty to follow the current Agent (inherit); set together with the provider.',
+      'config.model.maxOutputTokens.label': 'Output token cap',
+      'config.model.maxOutputTokens.hint': '0 lets the route decide.',
+      'config.model.placeholder': 'inherit (follow the current Agent)',
+      'config.noForm': 'This module exposes no editable Host configuration (its Host Config needs .volatile() fields).',
+      'config.failedRefresh': 'Save refused: the configuration may have changed elsewhere; the page refreshed — try again.',
+      'config.invalidOption': 'Choose a valid option.',
+      'config.model.reasoningEffort.label': 'Reasoning effort',
+      'config.model.reasoningEffort.hint': 'Inherit uses the main session\'s reasoning effort.',
+      'config.reasoning.inherit': 'Inherit',
+      'config.reasoning.off': 'Off',
+      'config.reasoning.low': 'Low',
+      'config.reasoning.medium': 'Medium',
+      'config.reasoning.high': 'High',
+      'config.reasoning.max': 'Max',
     });
 
     /** Last-resort translator replaced by the bound locale service in `apply`. */
@@ -612,6 +734,24 @@ window.__ModuleLoader__.load({
       itemSep: 'ctxslim-item-sep',
       more: 'ctxslim-more',
       meta: 'ctxslim-meta',
+      configForm: 'ctxslim-config-form',
+      configRow: 'ctxslim-config-row',
+      configHead: 'ctxslim-config-head',
+      configLabel: 'ctxslim-config-label',
+      configStatus: 'ctxslim-config-status',
+      configFailed: 'ctxslim-config-failed',
+      configSaved: 'ctxslim-config-saved',
+      configDirty: 'ctxslim-config-dirty',
+      configFooter: 'ctxslim-config-footer',
+      save: 'ctxslim-save',
+      input: 'ctxslim-input',
+      hint: 'ctxslim-hint',
+      invalid: 'ctxslim-invalid',
+      switchControl: 'ctxslim-switch',
+      switchThumb: 'ctxslim-switch-thumb',
+      checkboxInput: 'ctxslim-checkbox-input',
+      segmented: 'ctxslim-segmented',
+      segmentedTab: 'ctxslim-segmented-tab',
     });
 
     /**
@@ -811,6 +951,44 @@ window.__ModuleLoader__.load({
       '.ctxslim-meta{color:var(--dsw-alias-label-caption);font-size:var(--dsh-content-font-size-tertiary,12px);line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px))}',
       '.ctxslim-more{color:var(--dsw-alias-label-caption)}',
       '@media (prefers-reduced-motion:reduce){.ctxslim-button{transition:none}}',
+      '.ctxslim-config{box-sizing:border-box;width:100%;min-width:0}',
+      '.ctxslim-config-form{flex-direction:column;display:flex}',
+      '.ctxslim-config-row{flex-direction:column;gap:6px;padding:12px 0;display:flex}',
+      '.ctxslim-config-row+.ctxslim-config-row{border-top:.5px solid var(--dsw-alias-border-l2)}',
+      '.ctxslim-config-head{display:flex;align-items:center;gap:8px}',
+      '.ctxslim-config-label{flex:1;min-width:0;font-size:13px;font-weight:500;line-height:1.5;color:var(--dsw-alias-label-primary)}',
+      '.ctxslim-config-status{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
+      '.ctxslim-config-status[data-ctxslim-readonly]{margin:0 0 12px}',
+      '.ctxslim-config-failed{flex:1;min-width:0;margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-error)}',
+      '.ctxslim-config-saved{flex:1;min-width:0;margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary)}',
+      '.ctxslim-config-dirty{flex:1;min-width:0;margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
+      '.ctxslim-config-footer{display:flex;align-items:center;gap:8px;padding-top:16px}',
+      '.ctxslim-save{appearance:none;border:1px solid transparent;border-radius:var(--dsw-radius-md);padding:5px 14px;font:inherit;font-size:13px;line-height:1.5;cursor:pointer;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}',
+      '.ctxslim-save:disabled{opacity:.4;cursor:default}',
+      '.ctxslim-save:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}',
+      '.ctxslim-input{box-sizing:border-box;width:100%;height:34px;padding:0 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);font:inherit;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary)}',
+      '.ctxslim-input:focus-visible{outline:none;border-color:var(--dsw-alias-state-business-primary)}',
+      '.ctxslim-input:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
+      '.ctxslim-input[aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}',
+      '.ctxslim-hint{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}',
+      '.ctxslim-invalid{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-state-error-primary)}',
+      '.ctxslim-switch{box-sizing:border-box;position:relative;flex:0 0 auto;width:36px;height:20px;padding:2px;border:0;border-radius:999px;corner-shape:round;background:var(--dsw-alias-border-l3);cursor:pointer}',
+      '.ctxslim-switch[aria-checked=true]{background:var(--dsw-alias-brand-primary)}',
+      '.ctxslim-switch:disabled{cursor:default;opacity:.5}',
+      '.ctxslim-switch:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}',
+      '.ctxslim-switch-thumb{display:block;width:16px;height:16px;border-radius:50%;corner-shape:round;background:var(--dsw-alias-label-primary-foreground);transition:transform .12s ease}',
+      '.ctxslim-switch[aria-checked=false] .ctxslim-switch-thumb{background:var(--dsw-alias-switch-thumb)}',
+      '.ctxslim-switch[aria-checked=true] .ctxslim-switch-thumb{transform:translate(16px)}',
+      '.ctxslim-checkbox-input{flex:0 0 auto;width:16px;height:16px;margin:0;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}',
+      '.ctxslim-checkbox-input:disabled{cursor:default;opacity:.5}',
+      '.ctxslim-checkbox-input:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}',
+      '.ctxslim-segmented{box-sizing:border-box;position:relative;width:100%;display:inline-grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:2px;padding:4px;border-radius:var(--dsw-radius-md);background:var(--dsw-alias-interactive-bg-hover)}',
+      '.ctxslim-segmented-tab{box-sizing:border-box;position:relative;z-index:1;height:28px;padding:0 16px;border:0;border-radius:var(--dsw-radius-sm);background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:13px;line-height:20px;font-weight:500;white-space:nowrap;cursor:pointer;transition:color .12s ease}',
+      '.ctxslim-segmented-tab[aria-checked=true]{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-soft)}',
+      '@media (hover:hover){.ctxslim-segmented-tab:hover:not(:disabled){color:var(--dsw-alias-label-primary)}}',
+      '.ctxslim-segmented-tab:disabled{cursor:default;opacity:.4}',
+      '.ctxslim-segmented-tab:focus-visible{outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:-2px}',
+      '@media (prefers-reduced-motion:reduce){.ctxslim-switch-thumb,.ctxslim-segmented-tab{transition:none}}',
     ].join('');
 
     /**
@@ -855,6 +1033,548 @@ window.__ModuleLoader__.load({
 
     // #endregion
 
+
+    // #region plugin configuration page (native Plugins panel)
+
+    /** Policy values offered by the strategy control, in escalation order. */
+    const POLICY_VALUES = Object.freeze(['conservative', 'balanced', 'aggressive']);
+
+    /** Sentinel a model route stores when it follows the current Agent. */
+    const INHERIT_VALUE = 'inherit';
+
+    /** Reasoning-effort values the optional model override exposes. */
+    const REASONING_VALUES = Object.freeze([INHERIT_VALUE, 'off', 'low', 'medium', 'high', 'max']);
+
+    /**
+     * Documented v0.2 defaults. The Host serves a schema-resolved section, so
+     * these only fill gaps while a snapshot is stale or a field is new.
+     */
+    const CONFIG_FALLBACKS = Object.freeze({
+      enabled: true,
+      everyNToolCalls: 12,
+      minChars: 24000,
+      protectRecent: 3,
+      minTargetChars: 4096,
+      maxTargets: 4,
+      policy: 'conservative',
+      includeSubagents: true,
+      triggerOnErrorOnly: false,
+      timeoutMs: 120000,
+      model: Object.freeze({ provider: '', model: '', reasoningEffort: INHERIT_VALUE, maxOutputTokens: 0 }),
+    });
+
+    /**
+     * One editable configuration field. `name` is both the data-field hook CI
+     * asserts on and the settings path name; nested model fields keep their
+     * dotted display name and nested `path`.
+     */
+    const CONFIG_FIELDS = Object.freeze([
+      Object.freeze({ name: 'enabled', path: ['enabled'], kind: 'switch' }),
+      Object.freeze({ name: 'everyNToolCalls', path: ['everyNToolCalls'], kind: 'number', min: 1, max: 200, step: 1 }),
+      Object.freeze({ name: 'minChars', path: ['minChars'], kind: 'number', min: 0, max: 10000000, step: 1000 }),
+      Object.freeze({ name: 'protectRecent', path: ['protectRecent'], kind: 'number', min: 0, max: 50, step: 1 }),
+      Object.freeze({ name: 'minTargetChars', path: ['minTargetChars'], kind: 'number', min: 0, max: 1000000, step: 1 }),
+      Object.freeze({ name: 'maxTargets', path: ['maxTargets'], kind: 'number', min: 1, max: 20, step: 1 }),
+      Object.freeze({ name: 'policy', path: ['policy'], kind: 'segmented', options: POLICY_VALUES }),
+      Object.freeze({ name: 'includeSubagents', path: ['includeSubagents'], kind: 'checkbox' }),
+      Object.freeze({ name: 'triggerOnErrorOnly', path: ['triggerOnErrorOnly'], kind: 'checkbox' }),
+      Object.freeze({ name: 'timeoutMs', path: ['timeoutMs'], kind: 'number', min: 1000, max: 600000, step: 1000 }),
+      Object.freeze({ name: 'model.provider', path: ['model', 'provider'], kind: 'text', inherit: true }),
+      Object.freeze({ name: 'model.model', path: ['model', 'model'], kind: 'text', inherit: true }),
+      Object.freeze({ name: 'model.reasoningEffort', path: ['model', 'reasoningEffort'], kind: 'select', options: REASONING_VALUES }),
+      Object.freeze({ name: 'model.maxOutputTokens', path: ['model', 'maxOutputTokens'], kind: 'number', min: 0, max: 1000000, step: 1 }),
+    ]);
+
+    /**
+     * Read one nested value from a Host configuration section.
+     * @param value - section value (untrusted JSON).
+     * @param path - settings path.
+     * @returns raw value, or undefined when absent.
+     */
+    function readPath(value, path) {
+      let current = value;
+      for (const key of path) {
+        if (!isRecord(current)) return undefined;
+        current = current[key];
+      }
+      return current;
+    }
+
+    /**
+     * Fallback value for one field path.
+     * @param path - settings path.
+     * @returns documented default.
+     */
+    function fallbackAt(path) {
+      return readPath(CONFIG_FALLBACKS, path);
+    }
+
+    /**
+     * Normalize a raw field value into the controlled-input shape: booleans for
+     * toggles, strings for numbers/text, and an empty string for `inherit` model
+     * routes (so the placeholder can explain the empty state).
+     * @param spec - field descriptor.
+     * @param value - Host section value.
+     * @returns editable draft value.
+     */
+    function draftValue(spec, value) {
+      const raw = readPath(value, spec.path);
+      const fallback = fallbackAt(spec.path);
+      const resolved = raw === undefined || raw === null ? fallback : raw;
+      if (spec.kind === 'switch' || spec.kind === 'checkbox') return resolved === true;
+      if (spec.kind === 'segmented' || spec.kind === 'select') return spec.options.includes(resolved) ? resolved : fallback;
+      if (spec.kind === 'number') {
+        return typeof resolved === 'number' && Number.isFinite(resolved) ? String(resolved) : String(fallback);
+      }
+      if (spec.inherit === true && resolved === INHERIT_VALUE) return '';
+      return typeof resolved === 'string' ? resolved : '';
+    }
+
+    /**
+     * Build the complete editable draft from one Host section.
+     * @param value - Host configuration section (undefined before the first read).
+     * @returns draft keyed by field name.
+     */
+    function buildDraft(value) {
+      const draft = {};
+      for (const spec of CONFIG_FIELDS) draft[spec.name] = draftValue(spec, value);
+      return draft;
+    }
+
+    /**
+     * Whether two drafts carry identical field values.
+     * @param left - first draft.
+     * @param right - second draft.
+     * @returns whether they edit the same values.
+     */
+    function draftsEqual(left, right) {
+      for (const spec of CONFIG_FIELDS) {
+        if (left[spec.name] !== right[spec.name]) return false;
+      }
+      return true;
+    }
+
+    /**
+     * Parse one field's draft value and range-check it.
+     * @param spec - field descriptor.
+     * @param text - draft value.
+     * @returns `{ ok: true, value }` or `{ ok: false, code }`.
+     */
+    function parseField(spec, text) {
+      if (spec.kind === 'switch' || spec.kind === 'checkbox') return { ok: true, value: text === true };
+      if (spec.kind === 'segmented' || spec.kind === 'select') {
+        return spec.options.includes(text) ? { ok: true, value: text } : { ok: false, code: spec.kind === 'segmented' ? 'policy' : 'option' };
+      }
+      if (spec.kind === 'text') {
+        const trimmed = typeof text === 'string' ? text.trim() : '';
+        if (spec.inherit === true && trimmed === '') return { ok: true, value: INHERIT_VALUE };
+        return { ok: true, value: trimmed };
+      }
+      const trimmed = typeof text === 'string' ? text.trim() : '';
+      if (!/^\d+$/.test(trimmed)) return { ok: false, code: 'number' };
+      const parsed = Number(trimmed);
+      if (!Number.isSafeInteger(parsed) || parsed < spec.min || parsed > spec.max) return { ok: false, code: 'range' };
+      return { ok: true, value: parsed };
+    }
+
+    /**
+     * Validate a whole draft, including the provider/model pair rule the Host
+     * cross-field check enforces.
+     * @param draft - editable draft.
+     * @returns `{ ok, errors, values }` with errors keyed by field name.
+     */
+    function validateDraft(draft) {
+      const errors = {};
+      const values = {};
+      for (const spec of CONFIG_FIELDS) {
+        const parsed = parseField(spec, draft[spec.name]);
+        if (parsed.ok) values[spec.name] = parsed.value;
+        else errors[spec.name] = parsed.code;
+      }
+      const provider = values['model.provider'];
+      const model = values['model.model'];
+      if (provider !== undefined && model !== undefined && (provider === INHERIT_VALUE) !== (model === INHERIT_VALUE)) {
+        errors['model.provider'] = 'modelPair';
+        errors['model.model'] = 'modelPair';
+      }
+      return { ok: Object.keys(errors).length === 0, errors, values };
+    }
+
+    /**
+     * Build the ordered `set` operations that turn the accepted draft into the
+     * edited one. Only changed fields are written; nested model fields keep their
+     * nested `path`.
+     * @param base - draft of the accepted Host section.
+     * @param draft - edited draft.
+     * @returns atomic settings path operations.
+     */
+    function buildOps(base, draft) {
+      const parsed = validateDraft(draft);
+      const ops = [];
+      for (const spec of CONFIG_FIELDS) {
+        if (draft[spec.name] === base[spec.name]) continue;
+        const value = parsed.values[spec.name];
+        if (value === undefined) continue;
+        ops.push({ op: 'set', path: spec.path.slice(), value });
+      }
+      return ops;
+    }
+
+    /**
+     * Human-readable validation message for one field error code.
+     * @param code - error code.
+     * @param spec - field descriptor.
+     * @param t - translator.
+     * @returns localized message.
+     */
+    function fieldErrorText(code, spec, t) {
+      if (code === 'range') return t('config.invalidRange', { min: spec.min, max: spec.max });
+      if (code === 'modelPair') return t('config.modelPair');
+      if (code === 'policy') return t('config.invalidPolicy');
+      if (code === 'option') return t('config.invalidOption');
+      return t('config.invalidNumber');
+    }
+
+    /**
+     * The one-line summary the Plugins page shows for this row.
+     * @param value - Host configuration section.
+     * @param t - translator.
+     * @returns display fragments to join with ` · `.
+     */
+    function summaryParts(value, t) {
+      const parts = [];
+      if (readPath(value, ['enabled']) === false) parts.push(t('config.summary.disabled'));
+      const calls = Number(draftValue(CONFIG_FIELDS[1], value));
+      parts.push(t('config.summary.calls', { count: formatCount(Number.isFinite(calls) ? calls : CONFIG_FALLBACKS.everyNToolCalls) }));
+      const rawPolicy = readPath(value, ['policy']);
+      const policy = POLICY_VALUES.includes(rawPolicy) ? rawPolicy : CONFIG_FALLBACKS.policy;
+      parts.push(t('config.policy.' + policy) + t('config.policySuffix'));
+      const provider = readPath(value, ['model', 'provider']);
+      const model = readPath(value, ['model', 'model']);
+      if (typeof provider === 'string' && provider !== '' && provider !== INHERIT_VALUE) {
+        parts.push(t('config.summary.model', { model: provider + '/' + (typeof model === 'string' ? model : '') }));
+      } else {
+        parts.push(t('config.summary.modelInherit'));
+      }
+      return parts;
+    }
+
+    /**
+     * Render one configuration row: label, control, hint, and inline error.
+     * @param spec - field descriptor.
+     * @param draft - current draft.
+     * @param errors - validation errors keyed by field name.
+     * @param disabled - whether the control is read-only or busy.
+     * @param t - translator.
+     * @param onChange - (field name, next value) handler.
+     * @returns row element with `data-field` for CI.
+     */
+    function configFieldRow(spec, draft, errors, disabled, t, onChange) {
+      const id = 'ctxslim-cfg-' + spec.name.replace(/\./g, '-');
+      const label = t('config.' + spec.name + '.label');
+      const error = errors[spec.name];
+      const children = [];
+      if (spec.kind === 'switch') {
+        children.push(h('div', { key: 'head', className: cls.configHead }, [
+          h('label', { key: 'label', className: cls.configLabel, htmlFor: id }, label),
+          h('button', {
+            key: 'switch',
+            id,
+            type: 'button',
+            role: 'switch',
+            className: cls.switchControl,
+            'aria-checked': draft[spec.name] === true,
+            'aria-label': label,
+            'data-field': spec.name,
+            'data-ctxslim-input': spec.name,
+            disabled,
+            onClick: () => onChange(spec.name, !(draft[spec.name] === true)),
+          }, h('span', { className: cls.switchThumb })),
+        ]));
+      } else if (spec.kind === 'checkbox') {
+        children.push(h('div', { key: 'head', className: cls.configHead }, [
+          h('label', { key: 'label', className: cls.configLabel, htmlFor: id }, label),
+          h('input', {
+            key: 'input',
+            id,
+            type: 'checkbox',
+            className: cls.checkboxInput,
+            checked: draft[spec.name] === true,
+            'aria-label': label,
+            'data-field': spec.name,
+            'data-ctxslim-input': spec.name,
+            disabled,
+            onChange: (event) => onChange(spec.name, Boolean(event && event.target && event.target.checked)),
+          }),
+        ]));
+      } else if (spec.kind === 'segmented') {
+        children.push(h('div', { key: 'head', className: cls.configHead }, [
+          h('span', { key: 'label', className: cls.configLabel }, label),
+        ]));
+        children.push(h('div', {
+          key: 'segments',
+          className: cls.segmented,
+          role: 'radiogroup',
+          'aria-label': label,
+          'data-field': spec.name,
+          'data-ctxslim-input': spec.name,
+        }, spec.options.map((option) => h('button', {
+          key: option,
+          type: 'button',
+          role: 'radio',
+          className: cls.segmentedTab,
+          'aria-checked': draft[spec.name] === option,
+          disabled,
+          onClick: () => onChange(spec.name, option),
+        }, t('config.policy.' + option)))));
+      } else if (spec.kind === 'select') {
+        children.push(h('div', { key: 'head', className: cls.configHead }, [
+          h('label', { key: 'label', className: cls.configLabel, htmlFor: id }, label),
+        ]));
+        children.push(h('select', {
+          key: 'input',
+          id,
+          className: cls.input,
+          value: draft[spec.name],
+          'data-field': spec.name,
+          'data-ctxslim-input': spec.name,
+          disabled,
+          'aria-invalid': error === undefined ? undefined : true,
+          'aria-describedby': error === undefined ? undefined : id + '-error',
+          onChange: (event) => onChange(spec.name, event && event.target ? String(event.target.value) : ''),
+        }, spec.options.map((option) => h('option', { key: option, value: option }, t('config.reasoning.' + option)))));
+      } else {
+        children.push(h('div', { key: 'head', className: cls.configHead }, [
+          h('label', { key: 'label', className: cls.configLabel, htmlFor: id }, label),
+        ]));
+        children.push(h('input', {
+          key: 'input',
+          id,
+          className: cls.input,
+          type: spec.kind === 'number' ? 'number' : 'text',
+          inputMode: spec.kind === 'number' ? 'numeric' : undefined,
+          min: spec.kind === 'number' ? spec.min : undefined,
+          max: spec.kind === 'number' ? spec.max : undefined,
+          step: spec.kind === 'number' ? spec.step : undefined,
+          value: draft[spec.name],
+          placeholder: spec.inherit === true ? t('config.model.placeholder') : undefined,
+          'data-field': spec.name,
+          'data-ctxslim-input': spec.name,
+          disabled,
+          'aria-invalid': error === undefined ? undefined : true,
+          'aria-describedby': error === undefined ? undefined : id + '-error',
+          onChange: (event) => onChange(spec.name, event && event.target ? String(event.target.value) : ''),
+        }));
+      }
+      children.push(h('p', { key: 'hint', className: cls.hint }, t('config.' + spec.name + '.hint')));
+      if (error !== undefined) {
+        children.push(h('p', {
+          key: 'error',
+          id: id + '-error',
+          className: cls.invalid,
+          role: 'alert',
+          'data-ctxslim-field-error': spec.name,
+        }, fieldErrorText(error, spec, t)));
+      }
+      return h('div', {
+        key: spec.name,
+        className: cls.configRow,
+        'data-ctxslim-kind': spec.kind,
+      }, children);
+    }
+
+    /**
+     * `view: 'summary'`: the read-only one-liner the Plugins page shows beside
+     * the row (and as its description fallback).
+     * @param props - owner props `{ form, t }`.
+     * @returns inline summary element.
+     */
+    function ConfigSummary(props) {
+      const form = props === undefined ? undefined : props.form;
+      const t = props !== undefined && typeof props.t === 'function' ? props.t : fallbackTranslate;
+      const state = form && isRecord(form.state) ? form.state : undefined;
+      const status = form === undefined ? 'no-form' : (state !== undefined && typeof state.status === 'string' ? state.status : 'unavailable');
+      let text;
+      if (status === 'no-form') text = t('config.noForm');
+      else if (status === 'loading') text = t('config.loading');
+      else if (status !== 'ready' || state.value === undefined) text = t('config.unavailable');
+      else text = summaryParts(state.value, t).join(' · ');
+      const attributes = {
+        'data-ctxslim-config': '',
+        'data-ctxslim-view': 'summary',
+        'data-ctxslim-status': status,
+      };
+      if (status !== 'ready') attributes.role = 'status';
+      return h('span', attributes, text);
+    }
+
+    /**
+     * `view: 'page'`: the editable form with its single atomic save action.
+     *
+     * The component stages edits locally, writes only changed paths in one
+     * `form.mutate(ops, revision)` call, and keeps edits on refusal or transport
+     * failure (the Host's recovery read is shown by the next snapshot). Read-only
+     * deployments disable every control and hide the save action; `loading` and
+     * `unavailable` snapshots render status text instead of inputs.
+     * @param props - owner props `{ form, t }`.
+     * @returns form element with `data-ctxslim-config` and `data-field` hooks.
+     */
+    function ConfigPage(props) {
+      const form = props === undefined ? undefined : props.form;
+      const t = props !== undefined && typeof props.t === 'function' ? props.t : fallbackTranslate;
+      const state = form && isRecord(form.state) ? form.state : undefined;
+      const status = form === undefined ? 'no-form' : (state !== undefined && typeof state.status === 'string' ? state.status : 'unavailable');
+      const value = state === undefined ? undefined : state.value;
+      const writable = state !== undefined && state.writable === true;
+      const [draft, setDraft] = React.useState(() => buildDraft(value));
+      const [editing, setEditing] = React.useState(false);
+      const [saveState, setSaveState] = React.useState({ status: 'idle', detail: null });
+
+      React.useEffect(() => {
+        if (status !== 'ready' || editing) return;
+        setDraft((previous) => {
+          const next = buildDraft(value);
+          return draftsEqual(previous, next) ? previous : next;
+        });
+      }, [value, status]);
+
+      const base = buildDraft(value);
+      const dirty = !draftsEqual(draft, base);
+      const validation = validateDraft(draft);
+      const saving = saveState.status === 'saving';
+      const disabled = !writable || saving;
+
+      const updateDraft = (name, nextValue) => {
+        setDraft((previous) => {
+          if (previous[name] === nextValue) return previous;
+          const next = { ...previous };
+          next[name] = nextValue;
+          return next;
+        });
+        setEditing(true);
+        setSaveState((previous) => (previous.status === 'saving' ? previous : { status: 'idle', detail: null }));
+      };
+
+      const handleSave = () => {
+        if (!writable || saving || !dirty) return;
+        const check = validateDraft(draft);
+        if (!check.ok) return;
+        const ops = buildOps(base, draft);
+        if (ops.length === 0) return;
+        setSaveState({ status: 'saving', detail: null });
+        let settlement;
+        try {
+          settlement = Promise.resolve(form.mutate(ops, state === undefined ? undefined : state.revision));
+        } catch (error) {
+          setSaveState({ status: 'failed', detail: error instanceof Error ? error.message : String(error) });
+          return;
+        }
+        settlement.then((accepted) => {
+          if (accepted === false) {
+            setSaveState({ status: 'failed', detail: null, refresh: true });
+            setEditing(false);
+            return;
+          }
+          setSaveState({ status: 'saved', detail: null, refresh: false });
+          setEditing(false);
+        }, (error) => {
+          setSaveState({ status: 'failed', detail: error instanceof Error ? error.message : String(error), refresh: false });
+        });
+      };
+
+      const rootAttributes = {
+        'data-ctxslim-config': '',
+        'data-ctxslim-view': 'page',
+        'data-ctxslim-status': status,
+      };
+      if (status === 'no-form') {
+        return h('div', rootAttributes, h('p', {
+          className: cls.configStatus,
+          role: 'status',
+          'data-ctxslim-no-form': '',
+        }, t('config.noForm')));
+      }
+      if (status === 'loading') {
+        return h('div', rootAttributes, h('p', { className: cls.configStatus, role: 'status', 'data-ctxslim-loading': '' }, t('config.loading')));
+      }
+      if (status !== 'ready' || value === undefined) {
+        return h('div', rootAttributes, h('p', { className: cls.configStatus, role: 'status', 'data-ctxslim-unavailable': '' }, t('config.unavailable')));
+      }
+
+      const body = [];
+      if (!writable) {
+        body.push(h('p', {
+          key: 'readonly',
+          className: cls.configStatus,
+          role: 'status',
+          'data-ctxslim-readonly': '',
+        }, t('config.readOnly')));
+      }
+      body.push(h('div', { key: 'form', className: cls.configForm }, CONFIG_FIELDS.map((spec) => (
+        configFieldRow(spec, draft, validation.errors, disabled, t, updateDraft)
+      ))));
+
+      const footer = [];
+      if (saveState.status === 'failed') {
+        footer.push(h('p', {
+          key: 'message',
+          className: cls.configFailed,
+          role: 'status',
+          'data-ctxslim-message': 'failed',
+        }, saveState.refresh === true ? t('config.failedRefresh') : (saveState.detail === null ? t('config.failed') : t('config.failed') + ' ' + saveState.detail)));
+      } else if (saveState.status === 'saved') {
+        footer.push(h('p', {
+          key: 'message',
+          className: cls.configSaved,
+          role: 'status',
+          'data-ctxslim-message': 'saved',
+        }, t('config.saved')));
+      } else if (dirty) {
+        footer.push(h('p', {
+          key: 'message',
+          className: cls.configDirty,
+          role: 'status',
+          'data-ctxslim-message': 'dirty',
+        }, t('config.dirty')));
+      }
+      if (writable) {
+        footer.push(h('button', {
+          key: 'save',
+          type: 'button',
+          className: cls.save,
+          'data-ctxslim-save': '',
+          'aria-busy': saving,
+          disabled: !dirty || !validation.ok || saving,
+          onClick: handleSave,
+        }, saving ? t('config.saving') : t('config.save')));
+      }
+      body.push(h('div', { key: 'footer', className: cls.configFooter }, footer));
+
+      return h('div', {
+        ...rootAttributes,
+        'data-ctxslim-dirty': dirty ? 'true' : 'false',
+        'data-ctxslim-writable': writable ? 'true' : 'false',
+      }, body);
+    }
+
+    /**
+     * Slot entry point: dispatch `plugins.row.config` owner props to the summary
+     * line or the configuration page.
+     * @param props - owner props plus the injected locale seat.
+     * @returns summary or page element.
+     */
+    function ConfigView(props) {
+      const owner = isRecord(props) ? props : {};
+      if (owner.view === 'summary') return h(ConfigSummary, { form: owner.form, t: owner.t });
+      return h(ConfigPage, { form: owner.form, t: owner.t });
+    }
+
+    /** Memoized configuration renderer (memo is optional for structural tests). */
+    const ConfigViewView = typeof React.memo === 'function' ? React.memo(ConfigView) : ConfigView;
+
+    // #endregion
+
+
     // #region plugin entry
 
     /** Cordis services required before this client half can activate. */
@@ -886,11 +1606,19 @@ window.__ModuleLoader__.load({
         locale: LOCALE_NS,
       }, SlimRowView));
 
+      ctx.slots.inject(PLUGIN_CONFIG_SLOT, () => ctx.slots.register({
+        name: PLUGIN_CONFIG_SLOT,
+        key: PLUGIN_CONFIG_KEY,
+        locale: LOCALE_NS,
+      }, ConfigViewView));
+
       debug('client half activated', {
         kind: NODE_KIND,
         channels: [PRUNE_TYPE, TOOL_RESULT_TYPE],
         metaKey: META_KEY,
         slot: CHAT_NODE_SLOT,
+        configSlot: PLUGIN_CONFIG_SLOT,
+        configKey: PLUGIN_CONFIG_KEY,
       });
     }
 
@@ -912,13 +1640,26 @@ window.__ModuleLoader__.load({
         SUMMARY_ROLE,
         LOCALE_NS,
         CHAT_NODE_SLOT,
+        PLUGIN_CONFIG_SLOT,
+        PLUGIN_CONFIG_KEY,
         CSS_ID,
+        CONFIG_FIELDS,
+        CONFIG_FALLBACKS,
         dictionaries: { zh: ZH, en: EN },
         definition,
         matchSlimmingEvent,
         prunePayloadOf,
         replacementPayloadOf,
         normalizeSummary,
+        buildDraft,
+        draftsEqual,
+        validateDraft,
+        buildOps,
+        summaryParts,
+        ConfigView,
+        ConfigViewView,
+        ConfigSummary,
+        ConfigPage,
         SlimRow,
         SlimRowView,
       },

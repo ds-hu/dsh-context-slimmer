@@ -162,13 +162,13 @@ LIMITS      = {max_replacement_tokens, max_batch_shrink_ratio, min_confidence}
 
 - conservative 的安全性论据是"删除有副本/被覆盖内容"，因此 **benchmark 必须验证两件事**：① baseline 与 conservative 都 5/5 通过（不降质量）；② conservative 实际发生了 ≥1 次合法 drop 且模型可见工具文本下降（策略真的生效，而不是阈值卡成 no-op）。
 - 具体场景/校验点/指标/随机性控制见 `docs/research/benchmark-design.md`；其中 C-1 阈值若不修，benchmark 会在"保守模式零替换"处失败——这是**阈值 bug，不是策略失败**。
-- benchmark 还必须覆盖**规划器截断/超预算**（v0.1.0 生产回归：约 20 次里大多整批失败）这一独立退化类型，见下文 §10.6 与 `benchmark-design.md` §4.1/§7 D8。
+- benchmark 还必须覆盖**规划器截断/超预算**（v0.1.0 生产回归：14/15 子会话 `turn/end.reason.kind='max-tokens'`、整批失败）这一独立退化类型，见下文 §10.6 与 `benchmark-design.md` §4.1/§7 D8。
 
 ### 10.6 规划器截断/超预算（v0.1.0 生产回归）
 
-- **事实（生产回归）**：v0.1.0 的规划子 Agent 在长会话中思考过长、触达输出 token 上限，**整批计划失败**（约 20 次里大多失败，不是偶发抖动）。其失败形态是"整批失败 → 无精简/无效操作"，比"错误删除"更隐蔽，因为主上下文看起来完全正常。
-- **设计含义**：conservative 的"安全"以"规划器能在预算内产出合法计划"为前提；**[推断]** 因此 v0.2.0 的直调 LLM + `reasoningEffort: off` + planner `maxOutputTokens: 4096` + 极简 JSON prompt 是策略可靠性的必要条件，而不是纯性能优化。
-- **验证要求**：benchmark 必须单独观测 `finishReason ∈ {length,max_tokens}` 截断次数、失败整批次数与 planner prompt/completion tokens；**conservative 截断=0 且至少发生一次精简**才算通过（不对 aggressive 断言不截断）；若截断仍发生，插件应降级为整体 no-op（上下文不变）并告警，禁止部分应用计划。
+- **事实（生产日志，根因已更正）**：v0.1.0 的 `model.maxOutputTokens: 2048` 覆盖把**推理 token 和最终输出放进同一个 2048 输出预算**；规划子 Agent 又继承主模型的 `reasoningEffort: "max"` → 推理耗尽预算、最终输出被截断。生产日志中 **14/15 个子会话 `turn/end.reason.kind='max-tokens'`，最后一条 message 只有 reasoning block**，整批计划失败。失败形态是"整批失败 → 无精简/无效操作"，比"错误删除"更隐蔽，因为主上下文看起来完全正常；**根因不是"思考过长/上下文不够"**。
+- **设计含义**：conservative 的"安全"以"规划器能产出合法计划"为前提；**[推断]** 因此修复不应默认关思考（用户明确要求保留思考），而应**不设过小输出预算、不覆盖推理档**：`model.reasoningEffort` 默认空 = inherit（跟随主模型）；`model.maxOutputTokens` 默认 **0 = inherit**（不传 maxTokens，不设 2048/4096 上限）；仅当显式配置上限且 `finish=max-tokens` 时自动"不带 maxTokens 重试一次"，仍失败才 no-op + `planner-truncated` diagnostics。"不设过小输出预算、不覆盖推理档（默认 inherit）"是策略可靠性的必要条件，而不是纯性能优化。
+- **验证要求**：benchmark 必须单独观测 `finishReason ∈ {length,max_tokens}`/`turn/end.reason.kind` 截断次数、失败整批次数与 planner prompt/completion tokens；conservative 配置固定 `model.maxOutputTokens: 0`、`model.reasoningEffort` 空（inherit）；**conservative 截断=0 且至少发生一次精简**才算通过（不对 aggressive 断言不截断）；若截断仍发生，插件应降级为整体 no-op（上下文不变）并告警，禁止部分应用计划。
 - 详见 `docs/research/benchmark-design.md` §4.1/§7 D8。
 
 ### 10.7 引用与不确定性

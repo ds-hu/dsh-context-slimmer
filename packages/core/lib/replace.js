@@ -134,11 +134,16 @@ export function selectTargets(entries, options = {}) {
     results.push({ ...entry, toolName })
   }
   if (results.length === 0) return []
+  // Candidate scan window (Lead ruling §9.2): look back far enough to see
+  // adjacent duplicate/superseded pairs that a narrow window would hide, then
+  // filter. protectRecent still protects the newest N results.
+  const windowSize = Math.max(protectRecent + maxTargets * 3, 12)
+  const windowed = results.slice(-windowSize)
   const protectedSeqs = new Set()
   if (protectRecent > 0) {
-    for (const entry of results.slice(-protectRecent)) protectedSeqs.add(entry.seq)
+    for (const entry of windowed.slice(-protectRecent)) protectedSeqs.add(entry.seq)
   }
-  const eligible = results.filter((entry) => !protectedSeqs.has(entry.seq) && entry.chars >= minTargetChars)
+  const eligible = windowed.filter((entry) => !protectedSeqs.has(entry.seq) && entry.chars >= minTargetChars)
   if (eligible.length === 0) return []
   const chosen = maxTargets > 0 ? eligible.slice(-maxTargets) : []
   return chosen.map((entry, index) => ({
@@ -164,11 +169,12 @@ export function selectTargets(entries, options = {}) {
  * @param {'drop' | 'trim'} op Operation.
  * @param {string} [text] Trim replacement; ignored for `drop`.
  * @param {string} [reason] One-line reason for the drop stub.
+ * @param {{ kind?: string, duplicateOf?: string, supersededBy?: string }} [evidence] Verifiable drop evidence.
  * @returns {object[]} New content blocks.
  */
-export function buildReplacementContent(target, op, text, reason) {
+export function buildReplacementContent(target, op, text, reason, evidence) {
   const replacement = op === 'drop'
-    ? buildDropText({ toolName: target.toolName, callId: target.callId, chars: target.chars, reason })
+    ? buildDropText({ toolName: target.toolName, callId: target.callId, chars: target.chars, reason, evidence })
     : text
   return [{ type: 'text', text: replacement }, ...target.nonText]
 }
@@ -291,7 +297,15 @@ export function applyPlan({ session, targets, plan, estimateTokens, batch }) {
     if (!isTargetCurrent(session, target)) {
       throw new Error(`target seq ${String(target.seq)} is no longer a current tool result`)
     }
-    return { item, target, content: buildReplacementContent(target, item.op, item.text, item.reason) }
+    return {
+      item,
+      target,
+      content: buildReplacementContent(target, item.op, item.text, item.reason, {
+        ...(item.evidence === undefined ? {} : { kind: item.evidence.kind }),
+        ...(item.duplicateOf === undefined ? {} : { duplicateOf: item.duplicateOf }),
+        ...(item.supersededBy === undefined ? {} : { supersededBy: item.supersededBy }),
+      }),
+    }
   })
   const landed = []
   let metaLanded = false

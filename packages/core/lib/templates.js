@@ -54,39 +54,49 @@ export function foldAndTruncate(value, maxChars) {
 }
 
 /**
- * Build the host-generated `drop` stub, template T1 of the adaptation spec:
+ * Build the host-generated `drop` stub (v0.2.0, Lead ruling §9.1).
  *
- * `[elided by context-slimmer] tool=<toolName> call=<callId>; original=<chars>
- * chars; reason=<reason>; re-fetch: repeat the same call (original content not
- * retained)`
+ * The stub must point at the kept copy and explicitly tell the agent NOT to
+ * re-read/re-fetch the content: a "re-fetch" hint would invite the exact token
+ * waste the drop just saved. Evidence-specific wording:
  *
- * The stub is deliberately explicit: the main agent must never mistake it for
- * real tool output (docs/research/context-irrelevance-2026.md §9.7).
+ *   - duplicate: `duplicate of <callId> (kept above) — content identical, do not re-read`
+ *   - superseded: `superseded by <callId> (successful, newer) — do not retry the failed command`
+ *   - empty: no information to recover
+ *   - fallback: plain tool/call/reason record
  *
  * @param {object} input Stub fields.
  * @param {string} input.toolName Tool that produced the result.
  * @param {string} input.callId Provider call id of the paired call.
  * @param {number} input.chars Original character count.
  * @param {string} [input.reason] One-line reason; defaults to "irrelevant".
+ * @param {{ kind?: string, duplicateOf?: string, supersededBy?: string }} [input.evidence] Verifiable drop evidence.
  * @returns {string} Single-line drop stub.
  */
-export function buildDropText({ toolName, callId, chars, reason }) {
+export function buildDropText({ toolName, callId, chars, reason, evidence }) {
   const label = typeof toolName === 'string' && toolName.length > 0 ? toolName : 'unknown'
   const call = typeof callId === 'string' && callId.length > 0 ? callId : 'unknown'
   const why = foldAndTruncate(reason, 40) || DEFAULT_DROP_REASON
-  return (
-    `${ELIDED_PREFIX} tool=${label} call=${call}; original=${String(chars)} chars; ` +
-    `reason=${why}; re-fetch: repeat the same call (original content not retained)`
-  )
+  const kind = evidence?.kind
+  if (kind === 'duplicate' && typeof evidence?.duplicateOf === 'string' && evidence.duplicateOf.length > 0) {
+    return `${ELIDED_PREFIX} duplicate of ${evidence.duplicateOf} (kept above) — content identical, do not re-read`
+  }
+  if (kind === 'superseded' && typeof evidence?.supersededBy === 'string' && evidence.supersededBy.length > 0) {
+    return `${ELIDED_PREFIX} superseded by ${evidence.supersededBy} (successful, newer) — do not retry the failed command`
+  }
+  if (kind === 'empty') {
+    return `${ELIDED_PREFIX} empty output (${String(chars)} chars) — no content to recover; do not re-read`
+  }
+  return `${ELIDED_PREFIX} tool=${label} call=${call}; original=${String(chars)} chars; reason=${why}; do not re-read`
 }
 
 /** T2 — trim to the matched block (model generates; shown for prompt parity). */
 export const TRIM_BLOCK_TEMPLATE =
-  '[elided by context-slimmer] path=<path> lines=<start>-<end>; kept: <命中内容摘要，含符号/关键行>; original=<chars> chars; re-fetch: read <path>:<start>-<end>'
+  '[elided by context-slimmer] path=<path> lines=<start>-<end>; kept: <命中内容摘要，含符号/关键行>; original=<chars> chars; do not re-read unless later steps prove it necessary'
 
 /** T3 — trim to a superseded pointer (model generates). */
 export const SUPERSEDED_TEMPLATE =
-  '[elided by context-slimmer] superseded: old result <index> (turn <t1>) -> newer result <index2> (turn <t2>); latest state is in the newer result; do not rely on this entry'
+  '[elided by context-slimmer] superseded: old result <index> (turn <t1>) -> newer result <index2> (turn <t2>); latest state is in the newer result; do not re-read this entry'
 
 /** T4 — trim a failure to its evidence line (model generates). */
 export const FAILURE_TEMPLATE =

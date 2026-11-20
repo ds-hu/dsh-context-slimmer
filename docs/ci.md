@@ -483,3 +483,93 @@ scripts/ci/prepare-profile.sh --profile ci-headless --template headless --probe-
 scripts/ci/run-scenario.sh
 node scripts/ci/assert-slimming.mjs --session-log "$CI_ARTIFACTS_DIR/verify-session.jsonl"
 ```
+
+---
+
+## 12. v0.2.0 changes (planner is a direct LLM call; conservative default; benchmark)
+
+v0.2.0 (see `docs/plan-v0.2.md`) removes the managed-fork planner and changes the
+default policy to `conservative`. The CI changes below supersede the v0.1.0
+sections where they differ (the historical notes are kept for context).
+
+### 12.1 `assert-slimming.mjs` (hard gate)
+
+- New required check **`no-subagent-events`**: the main session log must contain
+  zero `subagent/*` events (the v0.2.0 planner is a direct `ctx.llm.stream()`
+  call). Disable with `--allow-subagents` only for a deliberate regression test.
+- New `--diagnostics <file>` check over `slimmer-diagnostics.jsonl`:
+  - required **`planner-diagnostics-present`** — the diagnostics file must
+    actually contain plan/apply/result records; an empty or missing file must
+    not silently pass the truncation gate.
+  - required **`no-planner-truncated`** — no record may indicate
+    `planner-truncated` / `finishReason=max-tokens|length` for a plan record.
+    This is the v0.1.0 production regression (planner output budget exhausted).
+  - advisory **`planner-observability`** — plan/apply records should carry
+    `usage` (prompt/completion tokens), `durationMs` and `finishReason`; the
+    report's `metrics.planner` aggregates them.
+- The existing checks are unchanged: prune record, summary consistency,
+  `sourceEventSeqs` replacement, shadow-price adjacency, append-only transcript,
+  fold-based `derived-context-shrank`, stream cross-check.
+- The child-session (`child-sessions/`) artifact is still captured for debugging
+  but is **no longer an assertion input**: `structured_output` from a fork child
+  is not expected any more.
+
+### 12.2 `screenshot.mjs` (non-fatal UI evidence)
+
+- `verify-plugin-config.png`: opens Plugins → installed bundle detail → module
+  row detail and asserts the v0.2.0 config form:
+  `[data-ctxslim-config]`, `data-field="everyNToolCalls"`,
+  `data-field="model.provider"`, `data-field="model.maxOutputTokens"`,
+  `data-field*="reasoningEffort"` and the save button `data-ctxslim-save`.
+  Status/selector counts are recorded in `screenshot-report.json.pluginConfig`.
+- New `subagentCounter` report field: the UI must not show a
+  `N 个子智能体` counter (catalog empty ⇒ hidden). `status: absent` expected;
+  a nonzero counter is recorded and warned about (the log gate remains hard).
+- Everything stays non-fatal: a missing form only warns and still uploads the
+  screenshots; log assertions decide pass/fail.
+
+### 12.3 `slimmer-config.default.json` (CI profile config)
+
+Now the v0.2.0 conservative defaults: `policy: conservative`,
+`everyNToolCalls: 12`, `minChars: 24000` (trigger is AND), `protectRecent: 3`,
+`minTargetChars: 4096`, `maxTargets: 4`, `includeSubagents: true`,
+`model: {}` (inherit provider/model/reasoning effort and the 0 = no-cap
+output budget; the 0.1.0 `provider: inherit` sentinel is accepted but clearer
+as an empty object), diagnostics enabled.
+The e2e scenario (`run-scenario.sh`) now reads the large fixture twice, makes
+eight deterministic small calls, runs the expected-failing command and then the
+`sleep 25` window — so the conservative trigger (≥12 results **and**
+≥24,000 chars) fires and only the duplicate read is a legal drop.
+
+### 12.4 `benchmark.yml` + `scripts/ci/benchmark.mjs` (new job)
+
+- One deterministic composite scenario (`scripts/ci/benchmark-scenario.md` +
+  `scripts/ci/bench/fixture/`) with 5 answer checkpoints (C1/C2 unique file
+  middle, C3 failure evidence, C4 kept duplicate copy, C5 unique log line).
+- Modes: `baseline` (plugin disabled), `conservative` (v0.2.0 defaults),
+  `aggressive` (v0.1 lossy, report-only), interleaved B/C/A.
+- Push defaults to R=1; `workflow_dispatch` accepts `repetitions=3`. Any
+  conservative run that performs no drop or reports `planner-truncated` is an
+  **invalid run** (the whole round is rerun once, then the job fails).
+- Hard gates: baseline & conservative 5/5 every run; conservative folded tool
+  text < baseline; conservative planner truncations = 0. `aggressive` is not
+  gated.
+- Outputs: `benchmark-report.json`, generated `docs/benchmark.md` (uploaded as
+  artifact; commit it when releasing) and a job-summary table that includes
+  planner prompt/completion tokens, duration, finishReason and truncations.
+- Conclusion wording is “非劣演示（single-run / R=N）”, never statistical
+  significance (see `docs/research/benchmark-design.md` §5).
+
+### 12.5 Local dry-runs (no key, no model calls)
+
+```bash
+bash -n scripts/ci/*.sh
+for f in scripts/ci/*.mjs; do node --check "$f"; done
+node scripts/ci/assert-slimming.mjs --self-test --allow-builtin-fold
+CI_ARTIFACTS_DIR=/tmp/ci-dry node scripts/ci/benchmark.mjs --dry-run
+CI_ARTIFACTS_DIR=/tmp/ci-dry node scripts/ci/screenshot.mjs --dry-run
+```
+
+Real paid runs (`verify.yml` e2e, `benchmark.yml`) stay gated on
+`DEEPSEEK_API_KEY` and are triggered by the Lead after core/ui land the v0.2.0
+host/client changes.

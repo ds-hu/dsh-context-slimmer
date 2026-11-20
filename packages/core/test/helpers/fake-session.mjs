@@ -72,6 +72,26 @@ export function createFakeSession(options = {}) {
     deriveEventMessage(event) {
       return event.data.message ?? null
     },
+    /** Latest request header config (settable per test). */
+    requestHeaderValue: options.requestHeader,
+    requestHeader() {
+      return session.requestHeaderValue
+    },
+    /** Folded tool history is irrelevant for the offline tests. */
+    toolHistory() {
+      return Object.freeze({})
+    },
+    /** Project the current surface into model-visible messages, in seq order. */
+    deriveMessages() {
+      const nodes = [...session.surface.nodes].sort((left, right) => left - right)
+      const messages = []
+      for (const seq of nodes) {
+        const event = session.eventAt(seq)
+        const message = event?.data?.message
+        if (message !== undefined) messages.push(message)
+      }
+      return messages
+    },
     /** Append a paired assistant tool call + tool result and return the result event. */
     appendToolResult(callId, toolName, text, { isError = false, turn = 1, step = 1 } = {}) {
       session.append(

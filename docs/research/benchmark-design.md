@@ -1,10 +1,11 @@
 # Benchmark 设计 — conservative 默认策略的质量非劣证明（v0.2.0 / issue #2）
 
 - **文档**：`docs/research/benchmark-design.md`
-- **版本**：v1.1（2026-11-20）
+- **版本**：v1.2（2026-11-20）
 - **v1.1 变更**：新增必测退化类型「规划器截断/超预算」（真实生产回归）；固定 5 校验点组成（≥2 唯一大 read / 1 失败精确错误 / ≥2 重复或高重复日志）；补随机性下限与单次运行降级规则。
+- **v1.2 变更**：更正规划器截断根因——v0.1.0 `maxOutputTokens: 2048` 把推理与最终输出放进同一预算、子 Agent 继承 `reasoningEffort: "max"`，14/15 子会话 `turn/end.reason.kind='max-tokens'` 且最后 message 只有 reasoning block；修复改为默认 inherit（`reasoningEffort` 空、`maxOutputTokens: 0` 不传上限），不默认关思考；benchmark conservative 配置同步。
 - **配套**：`docs/plan-v0.2.md` §5（绑定要求）、`docs/research/slimming-policy.md` §10（conservative 证据依据）、`docs/research/context-irrelevance-2026.md` §14（引用）。
-- **目标**：证明 `baseline`（插件 disabled）与 `conservative`（默认策略）都 **5/5** 通过事实校验点、conservative 的模型可见工具文本更少，且 `aggressive` 出现**可观测的质量退化**；同时把模型随机性/场景歧义与策略退化分开。
+- **目标**：证明 `baseline`（插件 disabled）与 `conservative`（默认策略）都 **5/5** 通过事实校验点、conservative 的模型可见工具文本更少、**规划器截断/超预算=0 且至少发生一次精简**，且 `aggressive` 出现**可观测的质量退化**；同时把模型随机性/场景歧义与策略退化分开。
 - **引用编号**：`[Rn]` 对应报告 §14；文献未直接测本插件，标注 **[推断]** 的句子是外推。
 
 ---
@@ -20,7 +21,7 @@
 | **G4 隐藏成本** | conservative 工具调用数 ≤ baseline +10%，setup 后的重复 read 次数 ≤ baseline，墙钟时间 ≤ baseline ×1.2 | 硬门禁 |
 | **G5 对照退化** | `aggressive` 中位校验点 <5，且至少 1 个校验点在 ≥半数 run 中缺失 | **观测项，不设发布门禁**（plan §5：允许失败/丢信息） |
 | **G6 场景自检** | baseline 在重复 run 中校验点集合一致；否则场景歧义，先修场景再谈策略 | 前置硬门禁 |
-| **G7 规划器稳健性** | conservative 每次有效 run：`finishReason ∈ {length,max_tokens}` 的截断次数 **=0**，**且**至少发生 1 次成功精简（applied drop ≥1）；否则不通过。**不对 aggressive 断言不截断**（只记录） | 硬门禁（仅 conservative） |
+| **G7 规划器稳健性** | conservative 每次有效 run：`finishReason ∈ {length,max_tokens}` 的截断次数 **=0**，**且**至少发生 1 次成功精简（applied drop ≥1）；否则不通过。**不对 aggressive 断言不截断**（只记录）。**依据：输出预算不覆盖推理**（默认 inherit：`reasoningEffort` 空、`maxOutputTokens: 0` 不传上限） | 硬门禁（仅 conservative） |
 
 > baseline 无规划器调用（插件 disabled），G7 不适用；aggressive 的截断/失败整批只作报告项。
 
@@ -128,13 +129,15 @@ grader：解析 JSON；每个字段做字面匹配（`failure` 接受 `ERR_BENCH
 
 ### 4.1 规划器截断/超预算（v0.1.0 生产回归，必测）
 
-**回归背景**：v0.1.0 的规划子 Agent 在长会话中思考过长、触达输出 token 上限，**整批计划失败**（生产统计：约 20 次里大多失败，不是偶发抖动）。v0.2.0 改为直调 LLM + `reasoningEffort: off` + planner `maxOutputTokens: 4096` + 极简 JSON prompt；benchmark 必须证明该失败模式消失，且 conservative 在"至少发生一次精简"的前提下仍 5/5。
+**回归背景（根因已按生产日志更正）**：v0.1.0 的 `model.maxOutputTokens: 2048` 覆盖把**推理 token 和最终输出放进同一个 2048 输出预算**；规划子 Agent 又继承主模型的 `reasoningEffort: "max"` → 推理耗尽预算，最终输出被截断/为空。生产日志：**14/15 个子会话 `turn/end.reason.kind='max-tokens'`，且最后一条 message 只有 reasoning block**（不是"思考过长/上下文不够"）。
+
+**修复方案（不默认关思考；用户明确要求保留思考）**：`model.reasoningEffort` 默认空 = inherit（跟随主模型）；`model.maxOutputTokens` 默认 **0 = inherit**（不传 maxTokens，不设 2048/4096 上限）；仅当显式配置上限且 `finish=max-tokens` 时，自动**不带 maxTokens 重试一次**，仍失败才 no-op + `planner-truncated` diagnostics。**benchmark conservative 配置固定为 `model.maxOutputTokens: 0`、`model.reasoningEffort` 空（inherit）**；必须证明截断模式消失，且 conservative 在"至少发生一次精简"的前提下仍 5/5。
 
 **判定规则（G7）**：
 
 1. conservative 的 `truncated_batches` 在**每次有效 run 都必须为 0**；出现 1 次即不通过（不论答案是否碰巧 5/5）。
 2. conservative 必须在 run 中**至少发生 1 次成功精简**（`applied_batches ≥ 1` 且实际 drop ≥1；与 G0 触发校验一致）；否则视为"截断规避了工作"或阈值 no-op，不通过。
-3. `planner_completion_tokens` 应显著低于 `maxOutputTokens=4096`；**[推断]** 建议观测 p90 ≤ 60%（>80% 视为接近触顶，需调 prompt/预算或拆分计划）——该比例是运维经验阈值，可按实测分布调整；仅作诊断告警，不单独否决。
+3. **默认配置（`maxOutputTokens: 0`）不设固定上限，不能用"completion/cap 比例"判定触顶**：每次 run 必须核查 `finishReason` 与 `turn/end.reason.kind` 均不含 `length`/`max-tokens`。仅当测试矩阵**显式配置非 0 上限**时，才观测 `planner_completion_tokens / cap`（**[推断]** p90 >80% 视为接近触顶，可调 prompt 或放宽上限；该比例是运维经验阈值，可按实测调整），仅作诊断告警，不单独否决。
 4. **不对 aggressive 断言不截断**：aggressive 允许更大计划/trim 输出，截断与整批失败只记录、报告，不构成门禁。
 5. 若 `finishReason`/usage 在该 dsh 版本不可见：benchmark 按 **fail-closed** 处理（conservative G7 不通过），报告标注"无法观测规划器截断"；不得用答案 5/5 代替该门禁。
 
@@ -144,8 +147,8 @@ grader：解析 JSON；每个字段做字面匹配（`failure` 接受 `ERR_BENCH
 
 ### 5.1 固定项（每次 run 相同）
 
-- 模型/供应商/版本固定并记录；**主 Agent**：`temperature=0`、`top_p=1`、`reasoningEffort=off`、`maxOutputTokens=2048`、`maxSteps` 固定（建议 40）、超时固定 120s。
-- **规划器调用**：`reasoningEffort=off`、`maxOutputTokens=4096`、极简 JSON prompt、超时固定（建议 60s）；每次调用记录 `prompt/completion tokens` 与 `finishReason`（见 §4.1）。
+- 模型/供应商/版本固定并记录；**主 Agent**：`temperature=0`、`top_p=1`、`reasoningEffort=off`、`maxOutputTokens=2048`（仅限制最终答案长度，**不用于规划器**）、`maxSteps` 固定（建议 40）、超时固定 120s。
+- **规划器调用**：benchmark 的 conservative 配置固定 `model.maxOutputTokens: 0`（=inherit，不传 maxTokens）、`model.reasoningEffort` 空（=inherit，跟随主模型，**不默认关思考**）、极简 JSON prompt、超时固定（建议 60s）；每次调用记录 `prompt/completion tokens`、`finishReason` 与 `turn/end.reason.kind`（见 §4.1）。
 - 同一 fixture commit、同一工作目录布局（固定临时路径模板，去掉随机目录名）、无网络；`verify.mjs`/`log.mjs` 输出完全确定（无时间戳/随机数/PID）。
 - 同一系统提示、同一工具集、同一 scenario prompt；两个模式只有插件开关/policy 不同。
 - 顺序：`repeat` 循环内 **B/C/A 轮换**（避免时钟漂移/缓存预热只偏向某一模式）；同一台机器同一次 CI job。
@@ -197,7 +200,7 @@ grader：解析 JSON；每个字段做字面匹配（`failure` 接受 `ERR_BENCH
 | **D5** | conservative token "必须 < baseline" | 阈值太弱（差 1 char 也算过） | 保留硬条件（每次 run <），另加"中位降幅 ≥10%"作为有效性信号 |
 | **D6** | 未要求 drop stub 指向保留副本 | 主 Agent 可能重跑，反复读会污染指标/答案 | benchmark 断言每条 drop stub 含保留目标 callId 且 `refetch_after_drop=0`（依赖 slimming-policy C-4 的实现） |
 | **D7** | 成本目标按三次会话 | 三会话=1 模式 1 次，不足以证明 | 按 §5.2 成本估算，15 run 仍在 ¥1 量级；保留每次 run 的 billed cost 记录 |
-| **D8（critical）** | plan §5 未包含规划器截断/超预算 | v0.1.0 真实回归：规划子 Agent 思考过长触顶、整批失败（约 20 次里大多失败）；v0.2.0 的直调 LLM/`reasoningEffort:off`/`maxOutputTokens:4096` 改动若无该指标则无法证明修复；"整批失败=无替换"还会被误读为"保守策略安全" | 增加 G7（conservative 截断=0 且 applied_batches≥1）；记录 planner prompt/completion tokens、时长、finishReason 直方图、失败整批原因；aggressive 截断只报告不断言；plan §7 验收清单同步加"planner truncation=0" |
+| **D8（critical）** | plan §5 未包含规划器截断/超预算 | v0.1.0 真实回归（根因已更正）：`maxOutputTokens: 2048` 共享推理+输出预算、子 Agent 继承 `reasoningEffort: "max"` → 14/15 子会话 `turn/end.reason.kind='max-tokens'`、最后 message 仅 reasoning block；v0.2.0 改为默认 inherit（`reasoningEffort` 空、`maxOutputTokens: 0`）、不默认关思考、显式上限且 max-tokens 时无 maxTokens 重试一次——若无该指标则无法证明修复；"整批失败=无替换"还会被误读为"保守策略安全" | 增加 G7（conservative 截断=0 且 applied_batches≥1）；benchmark conservative 固定 `maxOutputTokens: 0`/`reasoningEffort` 空；记录 planner prompt/completion tokens、时长、finishReason 直方图、失败整批原因；aggressive 截断只报告不断言；plan §7 验收清单同步加"planner truncation=0" |
 
 ---
 
@@ -208,4 +211,4 @@ grader：解析 JSON；每个字段做字面匹配（`failure` 接受 `ERR_BENCH
 3. 模型/厂商可能忽略 `seed`/temperature=0 仍非完全确定；本设计不依赖单次结果，靠重复 + 归因矩阵。
 4. benchmark 只覆盖一个复合场景，不能替代 30–50 任务 A/B（报告 §11 的 A/B-1/A/B-3 等）；发布说明应写成"复合场景非劣 + 已有 20 条回归用例"，不宣称广泛质量结论。
 5. 成本估算依赖 off-peak 价格 [R35]；峰值/缓存命中变化会改变金额，CI 需记录实际 billed usage。
-6. **[推断]** 规划器 usage/`finishReason` 能否从 dsh 会话事件/diagnostics 稳定读取取决于 v0.2.0 实现；benchmark 按 fail-closed 处理，必要时在 plan 中要求 host 将 planner 调用元数据写入 plugin record/diagnostics（§4.1 第 5 条）。
+6. **[推断]** 规划器 usage/`finishReason`/`turn/end.reason.kind` 能否从 dsh 会话事件/diagnostics 稳定读取取决于 v0.2.0 实现；benchmark 按 fail-closed 处理，必要时在 plan 中要求 host 将 planner 调用元数据写入 plugin record/diagnostics（§4.1 第 5 条）。

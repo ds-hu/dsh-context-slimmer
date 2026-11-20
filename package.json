@@ -1,6 +1,6 @@
 {
   "name": "@ds-hu/dsh-context-slimmer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Model-driven selective trimming of stale tool results in DeepSeek Harness sessions. Ships as independently switchable feature modules; the main agent keeps its normal context, the chat transcript keeps the original cards, and one extra line reports what was slimmed.",
   "type": "module",
   "publishConfig": {
@@ -38,8 +38,8 @@
     }
   },
   "dependencies": {
-    "@ds-hu/dsh-context-slimmer-core": "0.1.0",
-    "@ds-hu/dsh-context-slimmer-tool-result": "0.1.0"
+    "@ds-hu/dsh-context-slimmer-core": "0.2.0",
+    "@ds-hu/dsh-context-slimmer-tool-result": "0.2.0"
   },
   "license": "MIT",
   "files": [

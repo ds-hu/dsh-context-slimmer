@@ -1,15 +1,15 @@
 {
   "enabled": true,
-  "everyNToolCalls": 3,
-  "minChars": 0,
-  "protectRecent": 1,
-  "maxTargets": 6,
-  "minTargetChars": 2048,
+  "policy": "conservative",
+  "everyNToolCalls": 12,
+  "minChars": 24000,
+  "protectRecent": 3,
+  "minTargetChars": 4096,
+  "maxTargets": 4,
   "timeoutMs": 180000,
-  "forkProvider": "fork",
+  "includeSubagents": true,
+  "triggerOnErrorOnly": false,
   "promptLocale": "zh",
-  "model": {
-    "provider": "inherit"
-  },
+  "model": {},
   "diagnosticsFile": "/tmp/ci-artifacts/slimmer-diagnostics.jsonl"
 }

@@ -37,6 +37,7 @@ SCENARIO_TIMEOUT_SECONDS="${SCENARIO_TIMEOUT_SECONDS:-900}"
 INCLUDE_WEB_SEARCH="${INCLUDE_WEB_SEARCH:-1}"
 SLIMMER_FIXTURE_LINES="${SLIMMER_FIXTURE_LINES:-200}"
 KEEP_FIXTURE="${KEEP_FIXTURE:-0}"
+PRINT_PROMPT=0
 FIXTURE_FILE="$DSH_WORKSPACE_ROOT/.ci-fixture-large.txt"
 PROMPT=""
 
@@ -55,6 +56,7 @@ while [[ $# -gt 0 ]]; do
     --no-include-web-search) INCLUDE_WEB_SEARCH=0; shift ;;
     --prompt-file) PROMPT="$(cat "${2:?--prompt-file needs a value}")"; shift 2 ;;
     --keep-fixture) KEEP_FIXTURE=1; shift ;;
+    --print-prompt) PRINT_PROMPT=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage ;;
     *) die "unknown argument: $1 (try --help)" ;;
@@ -101,21 +103,46 @@ log "session timeout: ${SCENARIO_TIMEOUT_SECONDS}s"
 
 build_prompt() {
   if [[ -n "$PROMPT" ]]; then return 0; fi
-  local step=3 web_step="" wait_step=""
+  # v0.2.0 conservative defaults trigger with AND (>=12 new results AND
+  # >=24,000 new chars). The scenario therefore reads the large fixture twice
+  # (a byte-identical pair the conservative policy may drop), then performs
+  # enough small deterministic calls to cross the call threshold, then the
+  # failed command, an optional web search, and a long wait that keeps the
+  # session alive while the plugin's background batch lands.
+  local n=1
+  local steps=()
+  steps+=("${n}. Use the read tool to read the file \".ci-fixture-large.txt\" in the current working directory. It is a test fixture; read it once.")
+  n=$((n + 1))
+  steps+=("${n}. Use the read tool to read \".ci-fixture-large.txt\" again (same file, unchanged). Do not modify it.")
+  n=$((n + 1))
+  local commands=(
+    "ls"
+    "pwd"
+    "wc -l .ci-fixture-large.txt"
+    "wc -c .ci-fixture-large.txt"
+    "git status --short"
+    "head -1 .ci-fixture-large.txt"
+    "tail -1 .ci-fixture-large.txt"
+    "node -e 'console.log(\"CI_STEP_OK\")'"
+  )
+  for command in "${commands[@]}"; do
+    steps+=("${n}. Use the bash tool to run exactly: \`${command}\`. Do not pass any other command.")
+    n=$((n + 1))
+  done
+  steps+=("${n}. Use the bash tool to run exactly the command \`false\` once. That command is expected to fail; do not retry it.")
+  n=$((n + 1))
   if [[ "$INCLUDE_WEB_SEARCH" == "1" ]]; then
-    web_step="${step}. Use the web_search tool exactly once with the query \"DeepSeek V4.1 Flash\"."
-    step=$((step + 1))
+    steps+=("${n}. Use the web_search tool exactly once with the query \"DeepSeek V4.1 Flash\".")
+    n=$((n + 1))
   fi
-  wait_step="${step}. Use the bash tool to run exactly this command once: \`sleep 25\`. Do not pass any other command and do not retry it. This wait keeps the session alive while the plugin's background batch lands."
+  steps+=("${n}. Use the bash tool to run exactly this command once: \`sleep 25\`. Do not pass any other command and do not retry it. This wait keeps the session alive while the plugin's background batch lands.")
+  local numbered=""
+  for step in "${steps[@]}"; do numbered+="${step}"$'\n'; done
   PROMPT="$(cat <<EOF
 You are running a fixed CI verification scenario. Complete these steps exactly, in order, then stop.
 
-1. Use the read tool to read the file ".ci-fixture-large.txt" in the current working directory. It is a test fixture; read it once.
-2. Use the bash tool to run the command \`false\` exactly once. That command is expected to fail; do not retry it.
-${web_step}
-${wait_step}
-
-The bash tool is used exactly twice (steps 2 and ${step}). After all tool results above are available, reply with exactly this text and nothing else: CI_SCENARIO_DONE
+${numbered}
+After all tool results above are available, reply with exactly this text and nothing else: CI_SCENARIO_DONE
 
 Do not use any other tools. Do not read other files. Do not explore the repository. Do not retry failing commands.
 EOF
@@ -141,6 +168,10 @@ cleanup() {
 trap cleanup EXIT
 
 build_prompt
+if [[ "$PRINT_PROMPT" == "1" ]]; then
+  printf '%s\n' "$PROMPT"
+  exit 0
+fi
 if [[ "$INCLUDE_WEB_SEARCH" == "1" && -z "${DEEPSEEK_API_KEY:-}" ]]; then
   warn "web_search in the scenario needs a DeepSeek credential; the search tool may be withheld without DEEPSEEK_API_KEY"
 fi

@@ -1,6 +1,6 @@
 {
   "name": "@ds-hu/dsh-context-slimmer-tool-result",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Tool-result slimmer module of the Context Slimmer bundle: a background fork subagent periodically drops or trims stale tool results for the main agent, while the chat transcript keeps the original tool cards and one extra row reports what was slimmed. Independent Loader row: enable, disable and configure it on its own in the native Plugins panel.",
   "type": "module",
   "publishConfig": {
@@ -16,7 +16,7 @@
   },
   "icon": "./icon.svg",
   "dependencies": {
-    "@ds-hu/dsh-context-slimmer-core": "0.1.0"
+    "@ds-hu/dsh-context-slimmer-core": "0.2.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2"

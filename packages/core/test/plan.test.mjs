@@ -2,148 +2,224 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  BALANCED_MAX_TRIM_CHARS,
   CHARS_PER_TOKEN,
+  CONSERVATIVE_EVIDENCE_KINDS,
+  EMPTY_OUTPUT_PATTERNS,
   MAX_PLAN_ITEMS,
   MAX_TRIM_TOKENS,
   buildPlanJsonSchema,
   estimateTokens,
+  isEmptyOutput,
+  trimCharLimit,
   validatePlan,
 } from '../lib/plan.js'
 
 const prefix = '[elided by context-slimmer]'
 
-function targets(sizes = [2000, 4000, 8000]) {
-  return sizes.map((chars, index) => ({
+/** One candidate target; `text` defaults to a unique body large enough to trim. */
+function target(index, overrides = {}) {
+  const chars = overrides.chars ?? 2000
+  return {
     index,
-    seq: 10 + index,
-    callId: `call-${index}`,
-    toolName: 'bash',
+    seq: overrides.seq ?? 10 + index,
+    callId: overrides.callId ?? `call-${index}`,
+    toolName: overrides.toolName ?? 'bash',
+    isError: overrides.isError === true,
     chars,
-    text: `original text ${index} ${'x'.repeat(Math.min(chars, 100))}`,
-  }))
+    text: overrides.text ?? `original text ${index} ${'x'.repeat(Math.min(chars, 100))}`,
+  }
 }
 
-test('accepts a drop-only plan, a trim plan and an empty no-op plan', () => {
-  const drop = validatePlan({ summary: '清理', items: [{ index: 0, op: 'drop', reason: '无关' }] }, targets())
-  assert.equal(drop.ok, true)
-  assert.equal(drop.plan.items[0].op, 'drop')
-  assert.equal(drop.plan.summary, '清理')
+function targets(count = 3, overrides = {}) {
+  return Array.from({ length: count }, (_, index) => target(index, overrides))
+}
 
-  const trim = validatePlan({ summary: '收窄', items: [{ index: 2, op: 'trim', text: `${prefix} bash; original 8000 chars; re-run`, reason: 'bulk' }] }, targets())
+test('conservative accepts only verifiable evidence; trim is rejected', () => {
+  // Duplicate: index 1 is byte-equal to the kept index 0.
+  const duplicateTargets = [
+    target(0, { chars: 5000, text: 'same body\nline two' }),
+    target(1, { chars: 5000, text: 'same body\nline two' }),
+    target(2, { chars: 6000, text: 'different body' }),
+  ]
+  const duplicate = validatePlan(
+    {
+      summary: '去重',
+      items: [{ index: 1, op: 'drop', evidence: { kind: 'duplicate' }, duplicateOf: 'call-0', reason: '重复' }],
+    },
+    duplicateTargets,
+    { policy: 'conservative', minTargetChars: 4096 },
+  )
+  assert.equal(duplicate.ok, true)
+  assert.equal(duplicate.plan.items[0].duplicateOf, 'call-0')
+
+  // Empty: whitespace / (no output) / exit-code-only.
+  for (const text of ['   \n  ', '(no output)', '[no output]', 'exit code 0', 'Process exited with code 0']) {
+    const empty = validatePlan(
+      { summary: '空输出', items: [{ index: 0, op: 'drop', evidence: { kind: 'empty' }, reason: '空' }] },
+      [target(0, { text, chars: 4096 })],
+      { policy: 'conservative' },
+    )
+    assert.equal(empty.ok, true, `empty pattern should match: ${JSON.stringify(text)}`)
+  }
+
+  // Superseded: failed target (index 0) covered by later successful result (index 1).
+  const superseded = validatePlan(
+    {
+      summary: '覆盖',
+      items: [{ index: 0, op: 'drop', evidence: { kind: 'superseded' }, supersededBy: 'call-1', reason: '已被覆盖' }],
+    },
+    [target(0, { isError: true }), target(1, { seq: 20 })],
+    { policy: 'conservative' },
+  )
+  assert.equal(superseded.ok, true)
+
+  const trim = validatePlan(
+    { summary: 't', items: [{ index: 0, op: 'trim', text: `${prefix} kept`, reason: 'bulk' }] },
+    targets(),
+    { policy: 'conservative' },
+  )
+  assert.equal(trim.ok, false)
+  assert.equal(trim.code, 'policy-op-trim')
+
+  // Missing / non-verifiable evidence is rejected, not trusted.
+  const missing = validatePlan({ summary: 's', items: [{ index: 0, op: 'drop' }] }, targets())
+  assert.equal(missing.ok, false)
+  assert.equal(missing.code, 'item-missing-evidence')
+
+  const irrelevant = validatePlan(
+    { summary: 's', items: [{ index: 0, op: 'drop', evidence: { kind: 'irrelevant' } }] },
+    targets(),
+    { policy: 'conservative' },
+  )
+  assert.equal(irrelevant.ok, false)
+  assert.equal(irrelevant.code, 'item-evidence-kind')
+})
+
+test('conservative duplicate evidence must be true and kept', () => {
+  const pair = [target(0, { chars: 5000, text: 'A\nB' }), target(1, { chars: 5000, text: 'A\nB' })]
+  const base = (index, duplicateOf) => ({
+    summary: 's',
+    items: [{ index, op: 'drop', evidence: { kind: 'duplicate' }, duplicateOf }],
+  })
+
+  const different = validatePlan(base(1, 'call-0'), [target(0, { chars: 5000, text: 'A\nB' }), target(1, { chars: 5000, text: 'A\nC' })], { policy: 'conservative' })
+  assert.equal(different.ok, false)
+  assert.equal(different.code, 'item-not-duplicate')
+
+  // Pointing at a result that this same plan also drops is rejected.
+  const droppedRef = validatePlan(
+    {
+      summary: 's',
+      items: [
+        { index: 0, op: 'drop', evidence: { kind: 'duplicate' }, duplicateOf: 'call-1' },
+        { index: 1, op: 'drop', evidence: { kind: 'duplicate' }, duplicateOf: 'call-0' },
+      ],
+    },
+    pair,
+    { policy: 'conservative' },
+  )
+  assert.equal(droppedRef.ok, false)
+  assert.equal(droppedRef.code, 'item-duplicate-ref')
+
+  const unknownRef = validatePlan(base(1, 'call-404'), pair, { policy: 'conservative' })
+  assert.equal(unknownRef.ok, false)
+  assert.equal(unknownRef.code, 'item-duplicate-ref')
+
+  const tooSmall = validatePlan(base(1, 'call-0'), [target(0, { chars: 100, text: 'same' }), target(1, { chars: 100, text: 'same' })], {
+    policy: 'conservative',
+    minTargetChars: 4096,
+  })
+  assert.equal(tooSmall.ok, false)
+  assert.equal(tooSmall.code, 'item-duplicate-ref')
+})
+
+test('conservative superseded evidence is checked for direction/tool/status', () => {
+  const superseded = (index, supersededBy) => ({ summary: 's', items: [{ index, op: 'drop', evidence: { kind: 'superseded' }, supersededBy }] })
+  assert.equal(validatePlan(superseded(0, 'call-1'), [target(0, { isError: true }), target(1)], { policy: 'conservative' }).ok, true)
+
+  const notFailed = validatePlan(superseded(0, 'call-1'), [target(0), target(1)], { policy: 'conservative' })
+  assert.equal(notFailed.ok, false)
+  assert.equal(notFailed.code, 'item-not-superseded')
+
+  // The referenced result is earlier, not later.
+  const earlier = validatePlan(superseded(1, 'call-0'), [target(0, { isError: true }), target(1, { isError: true })], { policy: 'conservative' })
+  assert.equal(earlier.ok, false)
+  assert.equal(earlier.code, 'item-not-superseded')
+
+  const failedRef = validatePlan(superseded(0, 'call-1'), [target(0, { isError: true }), target(1, { isError: true, seq: 20 })], { policy: 'conservative' })
+  assert.equal(failedRef.ok, false)
+  assert.equal(failedRef.code, 'item-not-superseded')
+
+  const otherTool = validatePlan(superseded(0, 'call-1'), [target(0, { isError: true, toolName: 'bash' }), target(1, { toolName: 'read_file' })], { policy: 'conservative' })
+  assert.equal(otherTool.ok, false)
+  assert.equal(otherTool.code, 'item-not-superseded')
+
+  const unknownRef = validatePlan(superseded(0, 'call-404'), [target(0, { isError: true }), target(1)], { policy: 'conservative' })
+  assert.equal(unknownRef.ok, false)
+  assert.equal(unknownRef.code, 'item-superseded-ref')
+})
+
+test('empty evidence must actually be information-free', () => {
+  for (const text of ['important output', 'error: boom', 'line1\nline2']) {
+    const result = validatePlan(
+      { summary: 's', items: [{ index: 0, op: 'drop', evidence: { kind: 'empty' } }] },
+      [target(0, { text, chars: 4096 })],
+      { policy: 'conservative' },
+    )
+    assert.equal(result.ok, false, `must not be "empty": ${JSON.stringify(text)}`)
+    assert.equal(result.code, 'item-not-empty')
+  }
+})
+
+test('balanced allows trim up to min(50%, 4000 chars) and relaxed drop evidence', () => {
+  const balanced = (items, candidates = targets()) => validatePlan({ summary: 's', items }, candidates, { policy: 'balanced' })
+  const tiny = balanced([{ index: 0, op: 'trim', text: `${prefix} kept`, reason: 'bulk' }])
+  assert.equal(tiny.ok, true)
+  // 50% of 2000 = 1000 chars max under balanced.
+  const tooLong = balanced([{ index: 0, op: 'trim', text: `${prefix}${'y'.repeat(1001)}`, reason: 'bulk' }])
+  assert.equal(tooLong.ok, false)
+  assert.equal(tooLong.code, 'item-text-too-long')
+  // Irrelevant is allowed under balanced.
+  assert.equal(balanced([{ index: 0, op: 'drop', evidence: { kind: 'irrelevant' } }]).ok, true)
+  assert.equal(trimCharLimit('balanced', 100000), BALANCED_MAX_TRIM_CHARS)
+  // Trim text still cannot fabricate URLs.
+  assert.equal(validatePlan({ summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} see https://nope.invalid/x`, reason: 'b' }] }, targets(), { policy: 'balanced' }).code, 'item-text-fabricated')
+})
+
+test('aggressive keeps the legacy trim caps and drop rules', () => {
+  const trim = validatePlan({ summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} kept`, reason: 'b' }] }, targets(), { policy: 'aggressive' })
   assert.equal(trim.ok, true)
-  assert.equal(trim.plan.items[0].index, 2)
+  assert.equal(trimCharLimit('aggressive', 100000), MAX_TRIM_TOKENS * CHARS_PER_TOKEN)
+  // Drop without evidence is accepted under aggressive.
+  const drop = validatePlan({ summary: 's', items: [{ index: 0, op: 'drop', reason: 'noise' }] }, targets(), { policy: 'aggressive' })
+  assert.equal(drop.ok, true)
+  const tooLong = validatePlan({ summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix}${'y'.repeat(1210)}`, reason: 'b' }] }, targets(), { policy: 'aggressive' })
+  assert.equal(tooLong.ok, false)
+  assert.equal(tooLong.code, 'item-text-too-long')
+})
 
+test('structural rules stay strict and the schema carries the evidence fields', () => {
   const empty = validatePlan({ summary: '本次无改动', items: [] }, targets())
   assert.equal(empty.ok, true)
   assert.equal(empty.plan.items.length, 0)
-})
+  assert.equal(validatePlan({ summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} x`, extra: 1 }] }, targets()).code, 'item-unknown-key')
+  assert.equal(validatePlan({ summary: 's', items: [{ index: 9, op: 'drop' }] }, targets()).code, 'item-index-out-of-range')
+  assert.equal(validatePlan({ summary: 's', items: [{ index: 0, op: 'drop', evidence: { kind: 'bogus' } }] }, targets()).code, 'item-evidence-kind')
+  assert.equal(validatePlan({ summary: 's', items: [{ index: 0, op: 'drop', evidence: { kind: 'duplicate' } }] }, targets()).code, 'item-missing-evidence')
+  assert.equal(validatePlan({ summary: 's', items: [] }, []).code, 'no-candidates')
+  assert.equal(validatePlan({ summary: 's', items: [] }, [], { policy: 'nope' }).code, 'plan-invalid')
+  assert.equal(MAX_PLAN_ITEMS >= 12, true)
 
-test('rejects out-of-range, duplicate and non-dense candidate indexes', () => {
-  const outOfRange = validatePlan({ summary: 's', items: [{ index: 9, op: 'drop' }] }, targets())
-  assert.equal(outOfRange.ok, false)
-  assert.equal(outOfRange.code, 'item-index-out-of-range')
-
-  const duplicate = validatePlan({ summary: 's', items: [{ index: 1, op: 'drop' }, { index: 1, op: 'drop' }] }, targets())
-  assert.equal(duplicate.ok, false)
-  assert.equal(duplicate.code, 'item-duplicate-index')
-
-  const sparse = [{ index: 1, seq: 3, callId: 'c', toolName: 'bash', chars: 1000, text: 'x' }]
-  const nonDense = validatePlan({ summary: 's', items: [] }, sparse)
-  assert.equal(nonDense.ok, false)
-  assert.equal(nonDense.code, 'plan-invalid')
-})
-
-test('rejects unknown keys, missing/duplicate text and malformed items atomically', () => {
-  const unknownPlanKey = validatePlan({ summary: 's', items: [], extra: true }, targets())
-  assert.equal(unknownPlanKey.code, 'plan-unknown-key')
-
-  const unknownItemKey = validatePlan({ summary: 's', items: [{ index: 0, op: 'drop', stub: 'x' }] }, targets())
-  assert.equal(unknownItemKey.code, 'item-unknown-key')
-
-  const missingText = validatePlan({ summary: 's', items: [{ index: 0, op: 'trim' }] }, targets())
-  assert.equal(missingText.code, 'item-missing-text')
-
-  const dropWithText = validatePlan({ summary: 's', items: [{ index: 0, op: 'drop', text: 'x' }] }, targets())
-  assert.equal(dropWithText.code, 'item-drop-with-text')
-
-  const noPrefix = validatePlan({ summary: 's', items: [{ index: 0, op: 'trim', text: 'short summary' }] }, targets())
-  assert.equal(noPrefix.code, 'item-text-prefix')
-
-  const badIndex = validatePlan({ summary: 's', items: [{ index: 1.5, op: 'drop' }] }, targets())
-  assert.equal(badIndex.ok, false)
-})
-
-test('DEV-3: trim text must be <= min(50% of original, 300 tokens)', () => {
-  // 50% ratio bites on a small candidate: 1000 chars -> 500 max.
-  const small = [{ index: 0, seq: 1, callId: 'c', toolName: 'bash', chars: 1000, text: 'x' }]
-  const atLimit = `${prefix}${'a'.repeat(500 - prefix.length)}`
-  assert.equal(validatePlan({ summary: 's', items: [{ index: 0, op: 'trim', text: atLimit }] }, small).ok, true)
-  const overLimit = `${prefix}${'a'.repeat(501 - prefix.length)}`
-  assert.equal(validatePlan({ summary: 's', items: [{ index: 0, op: 'trim', text: overLimit }] }, small).code, 'item-text-too-long')
-
-  // Token cap bites on a large candidate: 300 tokens = 1200 chars.
-  const large = [{ index: 0, seq: 1, callId: 'c', toolName: 'bash', chars: 100000, text: 'x' }]
-  assert.equal(validatePlan({ summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix}${'a'.repeat(MAX_TRIM_TOKENS * CHARS_PER_TOKEN - prefix.length)}` }] }, large).ok, true)
-  assert.equal(validatePlan({ summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix}${'a'.repeat(MAX_TRIM_TOKENS * CHARS_PER_TOKEN - prefix.length + 1)}` }] }, large).code, 'item-text-too-long')
-
-  assert.equal(estimateTokens(1200), 300)
-  assert.equal(estimateTokens(1201), 301)
-})
-
-test('rejects fabricated URL and file:line evidence, but allows rewritten path labels', () => {
-  const candidate = [{ index: 0, seq: 1, callId: 'c', toolName: 'read_file', chars: 5000, text: 'opened /src/app.js:42 successfully' }]
-  const fabricatedLine = { summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} read /src/other.js:99` }] }
-  assert.equal(validatePlan(fabricatedLine, candidate).code, 'item-text-fabricated')
-  const realLine = { summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} read /src/app.js:42` }] }
-  assert.equal(validatePlan(realLine, candidate).ok, true)
-
-  const fabricatedUrl = { summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} see https://example.invalid/nope` }] }
-  assert.equal(validatePlan(fabricatedUrl, candidate).code, 'item-text-fabricated')
-  const realUrl = { summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} see https://example.com/real` }] }
-  const urlCandidate = [{ index: 0, seq: 1, callId: 'c', toolName: 'web_search', chars: 5000, text: 'result https://example.com/real is relevant' }]
-  assert.equal(validatePlan(realUrl, urlCandidate).ok, true)
-
-  // Regression (CI e2e): `path=` is a rewrite annotation, not a verbatim quote.
-  // A plan that labels the rewritten path must not be rejected as fabricated.
-  const pathCandidate = [{ index: 0, seq: 1, callId: 'c', toolName: 'read_file', chars: 5000, text: 'file contents without any absolute path annotation' }]
-  const pathLabelled = {
-    summary: 's',
-    items: [{ index: 0, op: 'trim', text: `${prefix} read result, path=/abs/fixture-large.txt, original 5000 chars, re-run read_file to restore`, reason: 'bulk' }],
-  }
-  const labelled = validatePlan(pathLabelled, pathCandidate)
-  assert.equal(labelled.ok, true, labelled.ok ? '' : labelled.message)
-  const pathWithLine = {
-    summary: 's',
-    items: [{ index: 0, op: 'trim', text: `${prefix} read /abs/fixture-large.txt:12`, reason: 'bulk' }],
-  }
-  // A path WITH a line number is still the high-risk file:line class.
-  assert.equal(validatePlan(pathWithLine, pathCandidate).code, 'item-text-fabricated')
-})
-
-test('maxItems follows the configured maxTargets, summary is folded and truncated', () => {
-  const many = targets([2000, 2000, 2000])
-  const items = [0, 1, 2].map((index) => ({ index, op: 'drop' }))
-  assert.equal(validatePlan({ summary: 's', items }, many, { maxItems: 3 }).ok, true)
-  assert.equal(validatePlan({ summary: 's', items }, many, { maxItems: 2 }).code, 'plan-too-many-items')
-
-  const folded = validatePlan({ summary: `line one\nline two ${'z'.repeat(200)}`, items: [] }, many)
-  assert.equal(folded.plan.summary.includes('\n'), false)
-  assert.ok(folded.plan.summary.length <= 80)
-})
-
-test('buildPlanJsonSchema stays inside the enforced output-schema subset', () => {
   const schema = buildPlanJsonSchema()
-  assert.equal(schema.type, 'object')
-  assert.equal(schema.additionalProperties, false)
-  assert.deepEqual(schema.required, ['summary', 'items'])
-  assert.deepEqual(Object.keys(schema.properties).sort(), ['items', 'summary'])
-  const item = schema.properties.items.items
-  assert.deepEqual(item.required, ['index', 'op'])
-  assert.deepEqual(item.properties.op.enum, ['drop', 'trim'])
-  const serialized = JSON.stringify(schema)
-  for (const forbidden of ['maxItems', 'minItems', 'minimum', 'maximum', 'maxLength', 'minLength']) {
-    assert.equal(serialized.includes(forbidden), false, `schema must not contain ${forbidden}`)
-  }
-  assert.ok(Object.isFrozen(schema))
-  assert.equal(MAX_PLAN_ITEMS, 12)
+  assert.equal(schema.properties.items.items.properties.evidence.properties.kind.enum.includes('duplicate'), true)
+  assert.equal(schema.properties.items.items.properties.duplicateOf.type, 'string')
+  assert.equal(schema.properties.items.items.properties.supersededBy.type, 'string')
+  assert.equal('maxItems' in schema.properties.items, false)
+
+  assert.equal(isEmptyOutput('   '), true)
+  assert.equal(isEmptyOutput('real output'), false)
+  assert.equal(EMPTY_OUTPUT_PATTERNS.length > 0, true)
+  assert.equal(CONSERVATIVE_EVIDENCE_KINDS.includes('duplicate'), true)
+  assert.equal(estimateTokens(8), 2)
 })

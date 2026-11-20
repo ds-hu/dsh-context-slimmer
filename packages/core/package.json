@@ -1,6 +1,6 @@
 {
   "name": "@ds-hu/dsh-context-slimmer-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pure shared library of the dsh-context-slimmer bundle: event protocol, surface-replacement primitive, plan validation, prompt builder, per-session counters and the row configuration schema. No dsh runtime imports at module load beyond schemastery; not a Loader row.",
   "type": "module",
   "main": "lib/index.js",

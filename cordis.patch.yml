@@ -33,7 +33,8 @@
 #   3. re-export nothing from the bundle package itself — the bundle is a patch,
 #      not a runtime plugin.
 - insert:
-    # Module I — tool-result slimmer: a background fork subagent drops or trims
-    # stale tool results via a surface `replace`, one compact record row in chat.
+    # Module I — tool-result slimmer: a hidden direct-LLM planner drops stale tool
+    # results that are provably redundant (default: conservative, drops only),
+    # applied as model-only surface `replace` events plus one compact chat row.
     - id: context-slimmer-tool-result
       name: '@ds-hu/dsh-context-slimmer-tool-result'

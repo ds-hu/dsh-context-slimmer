@@ -1,16 +1,21 @@
-# dsh-context-slimmer 架构说明（v1）
+# dsh-context-slimmer 架构说明（v2.0）
 
-> 状态：Lead 起草的架构契约；实现必须以此为准，允许在报告中提出偏差，但不得静默偏离。
-> 目标读者：core-dev、ui-dev、qa-reviewer、ci-engineer。
+> 状态：v0.2.0 实现契约。v1 的 fork-subagent 方案已被本文档第 3.2 节的直调 LLM 方案取代；
+> 决策过程、根因证据与偏差记录见 [`docs/plan-v0.2.md`](plan-v0.2.md) 与
+> [`docs/dev-notes.md`](dev-notes.md) 的 DEV-13/14。
+> 目标读者：维护者、core-dev、ui-dev、qa-reviewer、ci-engineer。
 
 ## 1. 产品目标
 
-对 DeepSeek Harness（dsh）主 Agent 的**工具调用结果**做模型驱动的选择性精简，降低长会话上下文压力，同时：
+对 DeepSeek Harness（dsh）Agent 的**工具调用结果**做模型驱动的选择性精简，降低长会话上下文压力，同时：
 
-1. **主 Agent 无感知**：主 Agent 后续只看到被替换后的工具结果，不会收到任何“被精简”的提示消息（替换通过原生 surface 替换事件完成，属于模型可见历史，不进入用户可见 transcript）。
-2. **用户可见历史不改写**：Chat 对话记录里原来的工具卡片保持原样；额外追加一行“已精简工具调用结果”（视觉上对齐原生“上下文已压缩”行），可展开查看本次精简明细。
-3. **原生机制优先**：fork subagent（`ctx.subagents` + `fork` provider）、surface replace 事件、scoped tool restrict、plugin record 事件、Bundle patch 多行开关。
-4. **模块化**：本仓库是一个 bundle，未来每个功能模块是**独立 npm 包 + 独立 Loader row**，在 dsh 原生插件面板中可单独开关、单独配置，互不影响。
+1. **Agent 无感知**：被精简的后果只出现在模型后续请求的 `deriveMessages()` 里；不注入提示消息、不改写任何事件内容以外的字段。
+2. **用户可见历史不改写**：Chat 里原来的工具卡片保持原样；额外追加一行“已精简工具调用结果”（视觉对齐原生“上下文已压缩”行），可展开查看明细。所有事件 append-only。
+3. **原生机制优先**：`compaction/prune` 影子记账 + `tool/result` surface 替换、`agent/pre-step` waterfall、`plugins.row.config` 原生配置页、bundle patch 多行开关；不 fork 进程之外的东西。
+4. **覆盖所有 Agent**：根 Agent 与子 Agent（含 agent-team 成员）都按同一策略精简（issue #1）。
+5. **默认谨慎**（issue #2）：默认 `conservative` 策略只做“可被程序证明无损”的整条 drop；长文本 read 与失败证据默认不动；`balanced`/`aggressive` 需显式开启。
+6. **模块化**：每个功能模块是独立 npm 包 + 独立 Loader row，在原生插件面板中单独开关、单独配置、互不影响。
+7. **规划器完全隐身**：选哪些结果可以删，由一个后台 LLM 调用决定；它不创建子会话、不出现在 WebUI“N 个子智能体”计数里、主 Agent 的 subagent 工具也列不出它。
 
 ## 2. 仓库 / 包结构（monorepo，npm workspaces）
 
@@ -20,174 +25,150 @@ dsh-context-slimmer/
 ├─ cordis.patch.yml             # 每个模块一行 insert（id = 模块包名导出的 name）
 ├─ packages/
 │  ├─ core/                     # @ds-hu/dsh-context-slimmer-core（共享库，不是 Loader row，不可开关）
-│  │  ├─ lib/                   # host 共享代码：事件协议、类型、替换原语、prompt 模板、配置 schema 片段
-│  │  └─ shared/                # host/client 共同引用的纯常量（事件类型名、默认值、阈值键名）
-│  └─ tool-result-slimmer/      # @ds-hu/dsh-context-slimmer-tool-result（模块 1：无用工具调用内容删减）
-│     ├─ lib/index.js           # host 半：行插件（apply/inject/name），Config schema
-│     ├─ lib/client.js          # client 半：手写 __ModuleLoader__ bundle（无构建步骤），渲染“已精简”行
-│     ├─ locale/*.json          # zh/en 等标题描述（插件面板 + UI 文案）
+│  │  └─ lib/                   # 事件协议、替换原语、计划校验、prompt、计数器、Config schema
+│  └─ tool-result-slimmer/      # @ds-hu/dsh-context-slimmer-tool-result（模块 1）
+│     ├─ lib/index.js           # host 半：agent/pre-step + 直调 ctx.llm.stream 的规划器
+│     ├─ lib/client.js          # client 半：手写 __ModuleLoader__ bundle（无构建），Chat 行 + 配置页
+│     ├─ locale/*.json          # zh/en 标题描述（插件面板 + UI 文案）
 │     ├─ icon.svg
 │     └─ README.md
-├─ docs/                        # 调研报告、API map、本架构、CI 文档
-├─ scripts/                     # CI 辅助脚本（由 ci-engineer 提供）
-└─ .github/workflows/           # verify.yml（真实会话+截图断言）+ publish.yml（npm 发布）
+├─ docs/                        # 调研、API 取证、协议、架构、CI、QA 报告
+├─ scripts/ci/                  # verify / benchmark / 发布辅助脚本
+└─ .github/workflows/           # verify.yml、benchmark.yml、publish.yml
 ```
 
-**为什么拆包**：原生插件面板的开关粒度 = Loader row 粒度，而一个 npm 包只能导出有限个可区分 row（`name` 必须等于包名才能被 Loader 从 profile node_modules 解析）。官方多模块范例 `@ds-hu/dsh-better-workspaces` 即采用 “bundle 包 + 每模块一个 npm 包 + 共享 core 包” 的结构，本仓库照此范式。
+**为什么拆包**：原生插件面板的开关粒度 = Loader row 粒度，而一个 npm 包只能解析自己的 row。官方多模块范例（如 `@ds-hu/dsh-better-workspaces`）即 “bundle 包 + 每模块一个 npm 包 + 共享 core 包”。
 
-**版本策略**：所有包同一版本号（lockstep），由 publish workflow 统一 `npm publish --workspaces`。
+**版本策略**：所有包同一版本号（lockstep），由 publish workflow 统一发布。
 
-## 3. 模块 1：无用工具调用内容删减（tool-result-slimmer）
+## 3. 模块 1：工具结果精简（tool-result-slimmer）
 
 ### 3.1 触发
 
-- 监听 **`agent/pre-step`** waterfall（`@deepseek-ai/dsh-agent` 的 agent-subject 事件，serial/awaited，位于“上一 step 工具批次已结算、下一 step 请求尚未组装”之间）。这是唯一能“在模型下一次看到上下文之前、且主 Agent 不在飞行中”的安全阻塞点。
-- 只处理满足条件的 agent：根 Agent 或普通会话 Agent；排除我们自己的 slimmer 子 Agent（按 childId 白名单排除）、排除 subagent 会话（`session.header.origin === 'subagent'`），避免递归。
-- 统计“自上次精简以来”追加到该 session surface 的 `tool/result` 事件（用 surface 节点/`session/deriveMessages` 或 `session/event` 增量计数；优先实现为按 session 维护计数器，`agent/pre-step` 时读取并清零）。
-- 触发条件（插件 Config，均可调）：
-  - `everyNToolCalls`（默认 8）：累计新工具结果数 ≥ N；`0` 表示关闭数量触发。
-  - `minChars`（默认 24000）：累计新工具结果文本字符数 ≥ 阈值时也触发（大输出提前触发）。
-  - 两者满足其一即触发；触发后重置计数。
-  - `protectRecent`（默认 2）：最近 K 个工具结果永不作为精简目标（安全阀）。
-  - `maxTargets`（默认 12）：单次最多精简条数，按时间倒序取最近的可精简结果。
-  - `enabled`（默认 true）。
-- 触发后计数重置；进度锚点保存在内存（每 session），插件挂载后首次 `pre-step` 只建基线不触发；重启/重载后依据“已带 `contextSlimmer` 元数据的 prune”与“已替换结果”天然幂等。
+- 监听 **`agent/pre-step`** waterfall（`@deepseek-ai/dsh-agent` 的 scope-filtered 事件，每步每个 Agent 在“上一批工具已结算、下一次请求尚未组装”之间 awaited 触发）。这是唯一能在模型下一次看到上下文之前、且 Agent 不在飞行中的安全阻塞点。
+- **每个 Agent 都会触发**：根 Agent 与子 Agent（`session.header.origin === 'subagent'`，包括 `subagent_*` 工具与 agent-team 成员）。`includeSubagents` 默认 `true`；设为 `false` 时仅跳过 origin 为 `subagent` 的会话（注意：agent-team 成员同样标为 subagent）。规划器是纯 LLM 调用、不是 Agent，因此不存在递归。
+- 按 session 维护计数器，统计“自上次精简以来”新增的 `tool/result` 数量与文本字符数；插件挂载后的首次 `pre-step` 只建立基线。
+- 触发条件是 **AND**（避免小批次频繁打扰）：
+  - `everyNToolCalls`（默认 `12`）：新增工具结果数 ≥ N；`0` 表示不按数量判断。
+  - `minChars`（默认 `24000`）：新增工具结果文本字符数 ≥ 阈值；`0` 表示不按字符判断。
+  - 两者同时满足才触发；触发后计数清零。`triggerOnErrorOnly=true` 时还要求窗口内出现过失败结果。
+- 候选筛选（宿主纯函数，`packages/core/lib/replace.js#selectTargets`）：
+  - 只看当前 surface 上已配对（assistant `tool/call` 之后）的 `tool/result`；
+  - 最近 `protectRecent`（默认 `3`）条永不触碰；
+  - 文本长度 < `minTargetChars`（默认 `4096`）不候选；
+  - 扫描窗口 `max(protectRecent + maxTargets*3, 12)` 后再过滤，单批最多 `maxTargets`（默认 `4`）条；
+  - 跳过本插件产生的替换事件（`surfaceOp !== 'append'` 或已带 `contextSlimmer` 元数据）。
 
-### 3.2 后台精简器（fork subagent + 原生结构化输出）
+### 3.2 规划器：直调 LLM，不创建子 Agent
 
-流程（全部在 `agent/pre-step` 内 `await`，主 Agent 被阻塞但无并发写入）：
+一次运行的全部步骤都在 `agent/pre-step` 内完成（主 Agent 被阻塞，因此无并发写）：
 
-1. 计算目标集合：从当前 surface 取最近 `maxTargets` 个、且不在 `protectRecent` 内的 `tool/result` 事件；每条包含：`index`（0-based）、`callId`、工具名、原始文本、是否为错误结果、其在日志中的 `seq`、字符数。工具名从对应 assistant `tool/call` 获取；跳过已带 `contextSlimmer` 元数据的替换事件。
-2. `ctx.subagents.startActivation({ provider: 'fork', label: 'context-slimmer', childId: <预生成 SessionId>, delivery: 'caller', signal, request: { prompt: [{type:'text',text:<system prompt 前言+任务+CANDIDATES>}], parent: agent, agentOptions: <模型覆盖>, outputSchema: <按 maxTargets 生成的计划 JSON Schema> } })`。
-   - 模型默认继承主 Agent（不传 `agentOptions.provider/model`）；Config 可指定 `model: { provider, model, reasoningEffort?, maxOutputTokens? }`、`timeoutMs`。
-   - **KV-cache 友好**：fork 子会话 seed = 父 session 已完成的 turn 前缀（原生 `fork` provider 行为），任务只作为追加 user message；不改写任何历史。
-   - **结构化输出（原生能力，替代自定义工具）**：fork provider capabilities 含 `outputSchema: true`；manager 会在子 Agent 创建窗口内原生挂 `structured_output` 工具并注入指令。子 Agent 只需返回计划，不提供/不注册任何自定义模型工具。计划从 `activation.result.structured` 读取；若该值缺失（provider/版本差异），从 `result.finalOutput` 文本提取 ```json 块作为兜底。
-3. 禁用子 Agent 的原生工具（满足“只允许返回计划”的产品要求，且不 import 任何 dsh 包）：
-   - `agent/created` 监听（await serial，子 Agent 第一次请求组装前）中对 `payload.agent.id === childId` 执行 `agent.ctx.tools.restrict({ deny: <插件初始化时从 ctx.tools.definitions() 枚举的全局工具名> })`。官方 practices：*“Hiding tools from one agent is ctx.tools.restrict() on that agent's context; register per-agent behavior on agent.ctx, obtained in an agent/created listener.”* `structured_output` 是 manager 的 scope-local 注册，不在 deny 名单内，天然保留。
-   - 兜底守卫：root ctx 上 `ctx.on('tools/pre-execute', ...)`，当 `exec.agent?.id === childId` 且工具名不是 `structured_output` 时返回 `{kind:'deny'}`。
-   - 注意 `agent.ctx` 是运行时属性（dsh-agent-loop 构造器 `this.ctx = this.scope.ctx`），TypeScript 公共接口未声明，JS 中直接访问并在缺失时降级为仅守卫。
-4. 子 Agent 返回结构化计划后结束本轮；`await activation.result` → `dispose()`。
-5. 执行阶段（见 3.3）在主 `agent/pre-step` 内同步完成；`agent/pre-step` 的 `next()` 继续。任何失败（超时/模型失败/计划非法/替换失败）**回滚为无操作**：主 Agent 上下文不变，仅 debug 日志（不写任何 session 事件）。超时默认 120s。
+1. 从当前 surface 选出候选目标，把“最近上下文 + 任务摘要 + 候选列表”组成规划器指令。
+2. **`ctx.llm.stream(GenerateOptions)`**（host 半 `inject: ['llm']`；范本 = 官方 `dsh-compaction-basic` 的 `summarizeWithLlm`）：
+   - `messages = [...session.deriveMessages(), { role: 'user', content: [{ type: 'text', text: instruction }] }]`
+   - `toolHistory = session.toolHistory()`；**不传 `tools`**、**不传 `purpose`**（避免模型调用主 Agent 工具，也避免跨包枚举问题）
+   - `sessionId = session.id`；`signal = AbortSignal.any([stepSignal, AbortSignal.timeout(timeoutMs)])`
+   - 模型路由三级 fallback：`config.model.{provider,model}`（都非空）→ `session.requestHeader()?.config` → `agent.options`；都没有 → 本次 no-op + diagnostics `no-model`。
+   - `reasoningEffort`：默认 `'inherit'` = 复制主模型本次路由的 effort（**保留思考**；面板可显式设为 off/low/medium/high/max…）。`maxOutputTokens`：默认 `0` = **不传**，跟随模型默认输出预算；显式设置时作为整个 completion（含推理）的上限。
+   - **截断保护**：若本次显式设置了 `maxOutputTokens` 且 finish 为 `max-tokens`，自动**不带 maxTokens 重试一次**；仍截断才失败 no-op 并写 diagnostics `planner-truncated`。绝不应用半截计划。
+   - 成功 finish 仅接受 `stop` / `tool-calls`；`max-tokens`/`aborted`/`error` 一律失败 no-op。
+3. 输出解析：纯文本 JSON（容错：直接 parse → 代码围栏 → 首尾大括号 → 平衡扫描）；同时兼容把计划放在 `structured_output` tool-call 里的旧格式（**只读不执行**任何工具调用）。
+4. 计划通过 `packages/core/lib/plan.js#validatePlan` 原子校验后，交给 `applyPlan` 落地（见 3.4）；任何失败（超时/模型失败/无效 JSON/策略拒绝/替换失败）都是 **no-op**，主 Agent 上下文不变。
 
-### 3.3 计划的执行（surface replace + 影子记账 + UI 元数据）
+**为什么不再 fork 子 Agent**（v0.1 → v0.2 的关键改动，见 plan §8/§10）：
 
-- 计划 schema（宿主运行时校验的权威在 `packages/core/lib/plan.js`，JSON Schema 仅作模型提示，`maxItems` 按 `config.maxTargets` 动态生成）：
-```jsonc
-{
-  "summary": "string",            // 一句话说明本次精简（中文，≤80 字）
-  "items": [                      // 只列出需要改动的目标；未列出=原样保留
-    { "index": 3,                 // CANDIDATES 序号（0-based，不是 seq）
-      "op": "drop",               // drop | trim
-      "text": "…",                // op=trim 时必填
-      "reason": "与任务无关" }      // 可选，≤40 字
-  ]
-}
-```
-- 语义：`drop` → 宿主生成占位 stub（`[elided by context-slimmer] …`，模型不写 stub）；`trim` → 用模型给的完整 `text` 替换。索引越界/重复、目标已替换、`text` 超过 `min(300 tokens, 原文 50%)`、字段非法 → **整单拒绝**（原子性，不落地任何替换）。
-- 执行顺序（每条目标）：**先 append 官方 log-only `compaction/prune`（带 `data.contextSlimmer` 扩展字段）→ 再 append `tool/result` 替换事件**，成对紧邻。
-- `compaction/prune.data` = `{ shadowedRange:{start,end}, shadowedSeqs:[seq], shadowedTokenCount:<tokenMeter.estimateMessage(original) 或字符估算>, contextSlimmer: {...} }`。
-- `contextSlimmer` 扩展字段（本仓库协议，**UI 行唯一数据源**，也用于幂等）：
-  - 每条 prune：`{ v:1, batchId, role:'item', index, op, charsBefore, charsAfter, toolName }`；
-  - 本批最后一条 prune：`role:'summary'`，并带 `{ status:'applied', startedAt, finishedAt, trigger:{...}, model:{provider,model,inherited}, items:[{index,callId,toolName,op,reason,charsBefore,charsAfter,replacementSeq}], totals:{items,charsBefore,charsAfter,charsSaved} }`。
-  - 为什么不用 `tool/result.data.meta`：`Session.append` 的 `assertToolResultRewrite` 要求替换事件除 `message.content` 外与原文逐字段深相等，meta 不能改（已由 core-dev 离线实测 + ui-dev 复核）。
-  - 为什么不用 `appendPluginRecord`：DSH practices 明确它是 experimental 保留通道、迁移只 best-effort 保留。
-  - 兼容性降级：若带扩展字段的 prune append 抛错（未来版本更严格校验），本实例缓存 `extensionSupported=false`，之后只写官方三字段；替换照常落地、UI 行缺失、debug 日志记录。
-- 替换事件构造（已验证 API，见 `@deepseek-ai/dsh-compaction-tool-result-pruner` 实现）：
-```js
-session.append('tool/result', {
-  turn: original.turn, step: original.step,
-  message: { ...original.message, content: [{ type: 'text', text }] }, // 保留 role/isError/source 等
-  ...(original.error === undefined ? {} : { error: original.error }),
-  ...(original.meta === undefined ? {} : { meta: original.meta }),      // meta 必须原样复制
-}, {
-  surfaceOp: { op: 'replace', startSeq: originalSeq, endSeq: originalSeq },
-  sourceEventSeqs: [originalSeq],
-});
-```
-- 安全阀：只允许替换 **当前 surface 上、已配对**（assistant tool/call 已有 result）的 `tool/result`；不触碰 user/assistant/system 消息；不触碰本插件产生的替换事件；不替换当前 step 未结算的结果（`protectRecent` 覆盖，另加硬保护：只用 `session.surface.nodes` 上已存在的结果）。
+- v0.1 的 fork 子 Agent 请求头带 `maxTokens: 2048` + 继承 `reasoningEffort: "max"`，而输出预算**同时覆盖推理与最终输出**；推理一开就耗尽 2048 → 生产日志里 14/15 个规划子会话 `turn/end.reason.kind = "max-tokens"`，最后一个 assistant message 只有 reasoning block，整批失败。v0.2 默认不设 maxTokens、默认继承推理档，且截断时自动重试无 cap。
+- 直调 LLM 不写 `subagent/*` 事件、不产生子会话：WebUI 顶部“N 个子智能体”不计数，主 Agent 的 `list_agents`/`wait_agent` 也列不出规划器（产品要求）。
+- 少一层 fork/seed/dispose 生命周期，成本与延迟更低。
 
-### 3.4 精简提示词（由调研报告驱动）
+**Prompt（`packages/core/lib/prompt.js` v1.4）**：policy-aware、zh/en 两套、每套 ≤2500 chars；只要求输出一个 JSON 对象、不解释/不思考、`reason` ≤20 字；conservative 明确“无法证明安全就返回 `{"items":[]}`”。不在 prompt 里要求任何工具调用。
 
-- 权威文档：`docs/research/prompt-adaptation.md`（工具 description + 中英 system prompt + 替换模板）与 `docs/research/slimming-policy.md`（分类决策表/硬规则/QA 断言）；`docs/research/prompt-regression.md` 的 20 条用例用于离线断言。core 包 `lib/prompt.js` 必须忠实实现这两份文档，不得自创规则。
-- 已确认的偏差决策（Lead 接受 paper-researcher 提案）：
-  - **DEV-1**：未解决的失败 → **保留精确错误证据**（命令原文、退出码、首个错误行、关键栈帧、重试参数），不做“drop + 经验教训”；仅“同一失败的重复重试”可 drop 为一行 `retry n, same failure, evidence unchanged` 并保留首次完整证据。这与 architecture 早先“失败直接 drop”表述冲突时，以本条为准。
-  - **DEV-2**：`drop` 的占位 stub 由宿主生成、以 `[elided by context-slimmer]` 开头（模型只给 `op:"drop"`，不写 stub 文本）；`trim` 的文本由模型给出。
-  - **DEV-3**：`trim` 文本上限收紧为 `min(300 tokens, 原文 50%)`，超限整单拒绝。
-  - **DEV-4**：payload 每项以 `index` 为主键（`[#<index>] tool=<name> error=<bool> chars=<n>` + 原文），`callId` 由宿主内部映射并写入本批 `meta.contextSlimmer.items` 审计；模型不得引用/臆造 callId。
-- 任务 payload 由 `lib/prompt.js` 组装为独立 user 内容块；system prompt 不拼接进 user。
-- 目标 ≤ 1200 tokens（中文按字符感知保守口径校验，见 prompt-adaptation §4 的长度说明）。
+### 3.3 策略与计划校验
+
+`policy` 三档（默认 `conservative`）：
+
+| 策略 | 允许的 op | 约束 |
+|---|---|---|
+| `conservative`（默认） | 仅 `drop` | 每条 drop 必须有**可程序校验的证据**：`duplicate`（`duplicateOf` 指向更晚、同 tool、归一化后逐字相等且未被同批 drop 的结果）、`superseded`（目标 `isError=true`，`supersededBy` 指向更晚、同 tool、成功且未被 drop 的结果）、`empty`（目标文本匹配核心 `EMPTY_OUTPUT_PATTERNS`）。**trim 整单拒绝**。 |
+| `balanced` | drop + trim | drop 证据放宽；trim ≤ `min(50%, 4000 chars)`，且不得引入原文不存在的 URL/行号等。 |
+| `aggressive` | drop + trim | v0.1 旧规则（trim ≤ min(50%, 300 tokens/1200 chars)），有损，需用户显式选择。 |
+
+- 校验是**确定性宿主代码**，模型只是提议者：证据引用必须指向真实候选、逐字相等/更晚成功等条件由宿主重算；索引越界、重复、字段非法、策略不允许 → **整单拒绝**（原子性，不落地任何替换）。
+- **20% 字符比例不是规则**：单批 drop 只受 `maxTargets` 约束；比例仅作为 benchmark 观测指标（plan §9 裁决）。
+- drop 的替换文本由宿主生成并**指向保留副本**，例如
+  `[elided by context-slimmer] duplicate of call_… (kept above) — content identical, do not re-read`；
+  禁止出现“可重新读取/re-fetch”字样，避免诱发重复读取。
+
+### 3.4 执行：影子记账 + surface 替换（append-only）
+
+对每条通过校验的目标：
+
+1. 先 append 官方 log-only **`compaction/prune`**：`{ shadowedRange:{start,end}, shadowedSeqs:[seq], shadowedTokenCount }`，并附加本仓库的 `data.contextSlimmer` 扩展字段；
+2. 再 append **`tool/result`** 替换事件：`{...original.data, message:{...original.message, content}}`，`surfaceOp = { op:'replace', startSeq: seq, endSeq: seq }`，`sourceEventSeqs:[seq]`。`assertToolResultRewrite` 要求除 `message.content` 外逐字段深相等，因此 meta 原样复制。
+3. `contextSlimmer` 是 UI 行与幂等的唯一数据源：每条 `role:'item'`，本批最后一条 `role:'summary'`（含 `status`、`trigger`、`model`、`items`、`totals`、可选的 `error`）。
+4. 兼容降级：若带扩展字段的 prune 被更严格的运行时拒绝，本实例缓存 `extensionSupported=false`，之后只写官方三字段；替换照常落地，仅 UI 行缺失（`metaLanded:false`）。
+
+安全阀：只替换当前 surface 上、已配对、未被 replace 过的 `tool/result`；替换内容必须比原文小；替换前复查目标仍是当前节点；失败整批回滚（已 append 的事件不会发生，因为先校验后写入）。
 
 ### 3.5 UI 行（client 半）
 
-- 展示位置：Chat 对话流中，紧随本批最后一条被替换的工具结果之后（anchorSeq = 该 `tool/result` 替换事件的 seq，位置自然落在当前对话流尾部）。
-- 视觉：与原生“上下文已压缩”行同构——一行浅色 tertiary 文本 + 上下文图标，文案：
-  - 默认：`已精简工具调用结果 · {items} 项 · 释放 {chars} 字符`
-  - 展开后：每一行 `#3 bash · drop · 8,123→48 · 与任务无关`，末尾 `模型：{provider}/{model}`。
-  - 失败/无操作：不产生替换事件，因此不渲染行（仅宿主 debug 日志）。Renderer 仍保留 status 非 `applied` 的灰色分支以向前兼容。
-- 实现（client 半，无构建）：
-  - 手写 `lib/client.js`，采用 dsh 客户端模块格式：
-    ```js
-    window.__ModuleLoader__.load({ id: '@ds-hu/dsh-context-slimmer-tool-result', factory: (require) => { ... } });
-    ```
-  - `package.json` 声明 `dsh.client: { platform: 'web', inject: ['slots','locale', 'uiConversation'] }`（按实际 service 名）；
-  - 在 `apply(ctx)` 中：`ctx.uiConversation.events.register(<自定义 Conversation Node Definition>)`；Definition 的 `match` 只匹配 `event.type === 'tool/result' && isReplacement(event) && event.data.meta?.contextSlimmer?.role === 'summary'`（matching 用事件自带的 `surfaceOp` 对象判定 replacement；不依赖客户端包级 isReplacementSurfaceEvent 导出），`start` 返回事件元数据、`buildViewNode` 产出 `target:'chat'`、`kind:'context-slimmer-tool-result'`、`anchorSeq`=事件 seq 的节点；并在 keyed slot `conversation.chat.node` 注册该 kind 的 React 渲染器（只用 baseline 外部模块 `react`；不依赖 primitives，避免 external 声明）。
-  - 文案走 locale（zh/en），由 client 半通过 `ctx.locale` 注册命名空间；宿主 locale 提供插件面板标题/描述。
-  - 通过 `ctx.chatNodes` / `ChatNodeDataMap` 扩展的实际注册方式以 api-scout 报告为准；若 keyed renderer 注册受限，退路：在原生 compaction 行旁边用 `conversation.chat.flow` 插槽注入自绘行（同一视觉规范）。
-- 注意：client 半禁止读写 session 内容、禁止发起网络请求；只消费事件与渲染。
+- 位置：Chat 对话流，锚定在本批最后一条替换事件之后；`ConversationNodeDefinition` 匹配
+  `event.type === 'compaction/prune' && data.contextSlimmer?.role === 'summary'`，keyed slot `conversation.chat.node` 渲染。
+- 文案：`已精简工具调用结果 · N 项 · 释放 C 字符`；展开显示每项 `#index tool · op · before→after`、触发条件、模型路由；非 `applied` 显示灰色分支。
+- 视觉：复用原生“上下文已压缩”行的 typography/token（tertiary 文本 + 图标 + chevron + `aria-expanded`）。
+- 实现：手写 `lib/client.js`（`window.__ModuleLoader__.load`，只 `require('react')`，无构建、无网络请求、不读 session 原文）。
 
-### 3.6 宿主 Config（插件面板可改）
+### 3.6 原生插件面板配置页
 
-```yaml
-- id: context-slimmer-tool-result
-  name: '@ds-hu/dsh-context-slimmer-tool-result'
-  config:
-    enabled: true
-    everyNToolCalls: 8
-    minChars: 24000
-    protectRecent: 2
-    maxTargets: 12
-    triggerOnErrorOnly: false
-    model:
-      provider: inherit        # inherit | <provider id>
-      model: inherit
-      reasoningEffort: null
-      maxOutputTokens: 2048
-    timeoutMs: 120000
-```
-Config 用 `@deepseek-ai/schemastery`（官方包均为该库），每个字段有 `.description()` 与默认值；`Config` 导出并被 Loader 面板渲染为表单。所有字段可热更新（`patchReload: live` 语义）；非法值在构造期拒绝（面板显示错误）。
+- client 半注册 keyed slot **`plugins.row.config`**，key = `<bundle 包名>#<row id>` =
+  `@ds-hu/dsh-context-slimmer#context-slimmer-tool-result`；owner props `{view:'summary'|'page', form?}`。
+- Host `Config` 的**每个可编辑字段都 `.volatile()`**（嵌套 `model.*` 也必须逐字段标），否则 settings 不生成 form、写入会抛 `not volatile`。Loader 在调用 `apply` 前已完成校验，插件自身再次 `Config()` 前必须深度解包 cosmokit 引用（`unwrapVolatileDeep`）。
+- 表单一次 `form.mutate(ops, form.state.revision)` 提交变更字段（嵌套 `path:['model','provider']`），写入 profile 的 `cordis.patch.yml`，Loader 热重载；冲突时提示“已刷新，请重试”。
+- 字段（14 个）：`enabled`、`everyNToolCalls`、`minChars`、`protectRecent`、`minTargetChars`、`maxTargets`、`policy`、`includeSubagents`、`triggerOnErrorOnly`、`timeoutMs`、`model.provider`、`model.model`、`model.reasoningEffort`、`model.maxOutputTokens`。
+- 已知限制：row 有 locale description 时原生 summary seat 不渲染（page 是主入口）；`promptLocale`/`diagnosticsFile` 不在 page 清单内，需要时直接改 profile patch。
 
 ### 3.7 模块独立性
 
-- 模块 1 只依赖 core 库与 dsh 内置服务；不提供/不消费任何自定义 Cordis service（避免 isolate 需求）。
-- 未来模块（例如“重复工具调用合并”“历史消息去噪”“图片/附件上下文压缩”）各自建包、各自 row；模块之间互不 import，只允许 import core 的纯函数/常量。
-- `context-slimmer` bundle 包本身不导出插件（无 `dsh.bundle.patch` 之外的代码行），只聚合模块；不参与运行时。
+- 模块 1 只依赖 core 纯库与 dsh 内置服务（`llm`、`slots`、`locale`、`uiConversation` 等），不提供/不消费自定义 service。
+- 未来模块各自建包、各自 row；模块之间互不 import，只允许 import core 纯函数/常量。
+- bundle 包本身不导出插件（只是一个 patch + locale + icon），不参与运行时。
 
-## 4. 质量门禁
+## 4. 诊断与可观测
 
-1. **静态**：`node --check` 所有 .js；JSON/YAML 解析；`npm pack --dry-run` 校验 files；locale key 完整性脚本。
-2. **单元（本机允许的离线测试，不构建、不联网）**：core 纯函数（计划校验、事件构造、prompt 组装、计数/阈值、字段裁剪）用 `node --test`。不启动 dsh、不调 API、不安装 profile。
-3. **CI 端到端（GitHub Actions）**：
-   - 起真实 dsh（headless 会话 + 真实 DeepSeek API，secret `DEEPSEEK_API_KEY`）；
-   - 让 Agent 产生多类工具结果（文件读取、失败命令、无关搜索、大输出），触发精简；
-   - 断言：日志出现 `plugin:` 记录且 `status=applied`、替换事件 surfaceOp=replace 指向原 seq、后续 `deriveMessages()` 中目标结果变短、用户可见 transcript（append-origin 事件）未被改写、主 Agent 未收到额外消息；
-   - 起 Web GUI + Playwright 截图，截图中出现“已精简工具调用结果”行（中/英 locale 各一张）；
-   - 失败上传会话日志、截图、插件日志。
-4. **发布（GitHub Actions，tag 触发）**：`npm ci && npm test && npm publish --workspaces`（NPM_TOKEN secret），发布前 `npm pack --dry-run` 断言包内容不含 key/测试文件；GitHub Release 附截图与报告。
-5. **生产安装**：部署到本机 `web` profile（`dsh plugin --profile web add <pkg>` 或 plugin_manager install_bundle），只装不跑额外测试；安装后确认插件面板出现开关、会话产出正常。
+- `diagnosticsFile`（默认空 = 关闭）可以写 JSONL 诊断：`trigger`、`llm-result`、`plan`、`validate`、`apply`、`no-op`、`llm-error`、`planner-truncated`。
+- 规划器元数据（`finishReason`、`usage.{promptTokens,completionTokens}`、`durationMs`、`retried`）会附加到 `llm-result`/`plan`/`validate`/`apply`，**不记录工具原文**。
+- CI 用它做硬门禁：本次运行不得出现 `planner-truncated`；主日志不得出现 `subagent/*` 事件。
 
-## 5. 安全与合规
+## 5. 质量门禁
 
-- 测试 key 只存在于：①本机环境变量（安装验证时）；②GitHub Actions secret。**任何仓库文件、README、日志、截图、产物都不得包含 key**（CI 中做 gitleaks/regex 扫描断言）。
-- 不采集用户隐私；prompt 与日志中工具结果可能含敏感信息：插件日志默认只记录字符数/条数，不落原文；`meta.contextSlimmer` 只存索引/字符数/原因/模型标识，不存原文（`reason` 由模型给出，已约定不得复述原文）。
-- 不修改 dsh 安装目录与 profile 之外的文件；安装动作显式、可回滚（`dsh plugin remove`）。
+1. **静态**：`node --check` 所有 `.js`；JSON/YAML 解析；`bash -n` 所有脚本；`npm pack --dry-run` 检查 files 白名单；locale key 完整性。
+2. **单元（离线）**：core 纯函数（策略校验、证据重算、事件构造、prompt 长度、计数 AND 阈值、Config volatile 解包）+ host 测试（mock `ctx.llm.stream`：正常/无文本/截断重试/双重截断/超时/抛错/策略拒绝/subagent 开关）。
+3. **CI 端到端（GitHub Actions，真实模型）**：起真实 dsh headless 会话（13 次工具调用：重复大 read、唯一大 read、失败命令、重复日志…），触发 conservative 精简；断言：prune/replacement 成对合法、`sourceEventSeqs` 正确、折叠后工具文本变短、用户可见 transcript 未改写、**无 `subagent/*` 事件**、diagnostics 无 `planner-truncated`；起 Web GUI + Playwright：截图“已精简工具调用结果”行 + 插件面板配置页（14 个 `data-field`），并断言页面无“N 个子智能体”计数。
+4. **Benchmark（真实模型）**：baseline（插件 disabled）/conservative/aggressive 对比，5 个精确事实校验点 + planner 开销/截断统计；硬门禁 baseline 与 conservative 5/5、conservative 折叠后字符 < baseline、conservative 截断 0；见 [`docs/benchmark.md`](benchmark.md)。
+5. **发布**：tag `v*` → 静态门禁 + `npm publish`（三个包，NPM_TOKEN）+ GitHub Release。
+6. **生产安装**：`dsh plugin --profile <p> add @ds-hu/dsh-context-slimmer@<version>`；安装后在原生面板确认行存在、可配置、会话正常。
 
-## 6. 待验证清单（实现前必须由 api-scout/core-dev 确认）
+## 6. 安全与合规
 
-| # | 问题 | 备选方案 |
-|---|---|---|
-| A1 | `agent/pre-step` 是否确为 awaited waterfall 且在此处 append 安全 | `agent/turn-stopping` + 追加 injected message 触发下一步；或 `tools/post-execute` |
-| A2 | `createScope(rootCtx, childAgent)` + `tools.restrict` 在子 Agent 第一次请求前生效 | `tools/pre-execute` 全量 deny 兜底；或自定义 `ctx.subagents` provider |
-| A3 | 自定义 `ConversationNodeDefinition` + keyed `conversation.chat.node` renderer 的精确注册 API | **已验证**：`ctx.uiConversation.events.register(definition)` + `ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({name:'conversation.chat.node', key:<kind>, locale:NS}, Component))`；范本见 `dsh-client-ui-chat/lib/client.js:11401/11798/9238`，`chatNode()` 在 9770 行 |
-| A4 | UI 数据通道：`tool/result.data.meta` 是否可持久化并被 client 收到 | **已验证成立**：`meta?: JsonValue` 官方定义为 tool-private presentation payload、durable log 可复现（`dsh-session/lib/types/types.d.ts` tool/result 段）；服务端 EventListener 无过滤转发全部 `session/event`（`dsh-api-session-controller/lib/index.js:1246-1320`）；client assembler 对每个事件调用 `definition.match`（`dsh-client-ui-conversation/lib/client.js:2807`）；chat 的 tool-call Definition 只对 append-origin 事件更新卡片，替换事件不污染用户转录（`dsh-client-ui-chat/lib/client.js:12484-12568`） |
-| A5 | `SubagentActivation.result` 的完成语义与 `dispose()` 时序 | `delivery:'caller'` + 轮询 child 状态 |
-| A6 | fork 子会话 seed 边界与“当前 turn 目标内容”的 payload 组合是否足以让模型正确判断 | 在 prompt 中显式声明“以下内容是当前 turn 的快照，以它为准” |
+- API key 只存在于环境变量 / GitHub Actions secret；仓库文件、README、日志、截图、benchmark artifact 均不得包含 key（CI `scan-secrets` 门禁）。
+- 插件日志与诊断只记录字符数/条数/模型标识/耗时；不记录工具结果原文与用户消息；prompt 指令中要求模型不得复述原文（`reason` 写类别）。
+- client 半无网络请求，只消费事件 payload。
+- 只修改 profile 配置与自身安装的包；安装/卸载显式。
+
+## 7. 兼容性与已知限制
+
+- 需要 DSH `>=0.2.0 <0.3.0`、Node.js `>=24.9.0`。
+- UI 行依赖 `compaction/prune` 的 additive 字段；未来运行时若拒绝，自动降级为“替换照常、行消失”。
+- `includeSubagents=false` 会同时跳过 agent-team 成员（它们同样是 origin=`subagent`）。
+- 面板自定义 page 取代原生自动表单：`promptLocale`/`diagnosticsFile` 不在 page 中（值保留、可经 profile patch 修改）。
+- benchmark 单次运行为“方向性/非劣演示”，统计显著需 `workflow_dispatch` 提高 repetitions。
+
+## 8. 关键文件索引
+
+- 触发/规划/落地：`packages/tool-result-slimmer/lib/index.js`
+- 事件协议：`packages/core/lib/events.js`；替换原语：`packages/core/lib/replace.js`
+- 策略校验：`packages/core/lib/plan.js`；提示词：`packages/core/lib/prompt.js`
+- 计数器/阈值：`packages/core/lib/counters.js`；Config：`packages/core/lib/config.js`
+- UI 行 + 配置页：`packages/tool-result-slimmer/lib/client.js`
+- 决策记录：`docs/plan-v0.2.md`、`docs/dev-notes.md`（DEV-13/14）
+- 协议细节：`docs/protocol.md`；CI：`docs/ci.md`；QA：`docs/qa-report.md` / `docs/qa-report-v0.2.md`
