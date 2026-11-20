@@ -44,6 +44,11 @@ PATTERNS=(
 )
 # Files that intentionally document the patterns themselves.
 EXCLUDE_PATHS='^(scripts/ci/scan-secrets\.sh|docs/ci\.md)$'
+# Obvious placeholder tokens are allowed (docs/tests may mention fake keys);
+# a real credential never has one of these prefixes.
+ALLOWED_FAKE='sk-(testonly|fake|dummy|example|sample|placeholder|redacted|xxxx)'
+# Findings never print the matched value: for a real key that would leak it into
+# the CI log, so only file:line (and tarball line numbers) are reported.
 
 is_text() { grep -Iq . "$1" 2>/dev/null; }
 
@@ -54,10 +59,12 @@ scan_file() {
   is_text "$file" || return 0
   local pattern
   for pattern in "${PATTERNS[@]}"; do
-    # -a: never treat matches as binary; -n: line numbers; -o would hide context.
-    if matches=$(grep -a -n -E -- "$pattern" "$file" 2>/dev/null | head -5); then
-      printf 'FINDING pattern=%q file=%s:%s\n' "$pattern" "$rel" "${matches//$'\n'/ | }"
-      FOUND=$((FOUND + 1))
+    if matches=$(grep -a -n -E -- "$pattern" "$file" 2>/dev/null | head -20); then
+      real_lines="$(printf '%s\n' "$matches" | grep -vE -- "$ALLOWED_FAKE" | cut -d: -f1 | paste -sd, - || true)"
+      if [[ -n "$real_lines" ]]; then
+        printf 'FINDING pattern=%q file=%s lines=%s\n' "$pattern" "$rel" "$real_lines"
+        FOUND=$((FOUND + 1))
+      fi
     fi
   done
 }
@@ -100,7 +107,7 @@ if (( PUBLISH )); then
   mapfile -t WORKSPACES < <(node -e '
     const fs = require("fs");
     const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
-    const out = [];
+    const out = ["."];
     const globs = Array.isArray(root.workspaces) ? root.workspaces
       : root.workspaces && Array.isArray(root.workspaces.packages) ? root.workspaces.packages : [];
     for (const glob of globs) {
@@ -112,7 +119,6 @@ if (( PUBLISH )); then
         if (fs.existsSync(`${dir}/package.json`)) out.push(dir);
       }
     }
-    if (out.length === 0) out.push(".");
     process.stdout.write(out.join("\n") + "\n");
   ')
   if (( ${#WORKSPACES[@]} == 0 )); then
@@ -123,19 +129,28 @@ if (( PUBLISH )); then
     log "npm pack --dry-run in $dir"
     ( cd "$REPO_ROOT/$dir" && npm pack --dry-run --json 2>/dev/null >/dev/null ) \
       || die "npm pack --dry-run failed in $dir"
-    pack_out="$TMP_PACKS/$(echo "$dir" | tr '/.' '__').tgz"
-    ( cd "$REPO_ROOT/$dir" && npm pack --pack-destination "$TMP_PACKS" >/dev/null 2>&1 ) \
+    ( cd "$REPO_ROOT/$dir" && npm pack --pack-destination "$TMP_PACKS" --json 2>/dev/null > "$TMP_PACKS/last-pack.json" ) \
       || die "npm pack failed in $dir"
-    tarball=$(find "$TMP_PACKS" -maxdepth 1 -name '*.tgz' -newer "$TMP_PACKS" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
-    [[ -n "${tarball:-}" && -f "$tarball" ]] || die "could not locate packed tarball for $dir"
+    tarball="$(node -e '
+      const fs = require("fs");
+      const parsed = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const entry = Array.isArray(parsed) ? parsed[0] : parsed;
+      if (!entry || typeof entry.filename !== "string") process.exit(1);
+      process.stdout.write(entry.filename);
+    ' "$TMP_PACKS/last-pack.json")" || die "could not parse npm pack output for $dir"
+    tarball="$TMP_PACKS/$tarball"
+    [[ -f "$tarball" ]] || die "packed tarball not found for $dir: $tarball"
     log "scanning packed tarball $(basename "$tarball")"
     for pattern in "${PATTERNS[@]}"; do
-      if matches=$(tar -xOzf "$tarball" 2>/dev/null | grep -a -n -E -- "$pattern" | head -5); then
-        printf 'FINDING pattern=%q tarball=%s:%s\n' "$pattern" "$(basename "$tarball")" "${matches//$'\n'/ | }"
-        FOUND=$((FOUND + 1))
+      if matches=$(tar -xOzf "$tarball" 2>/dev/null | grep -a -n -E -- "$pattern" | head -20); then
+        real_lines="$(printf '%s\n' "$matches" | grep -vE -- "$ALLOWED_FAKE" | cut -d: -f1 | paste -sd, - || true)"
+        if [[ -n "$real_lines" ]]; then
+          printf 'FINDING pattern=%q tarball=%s lines=%s\n' "$pattern" "$(basename "$tarball")" "$real_lines"
+          FOUND=$((FOUND + 1))
+        fi
       fi
     done
-    rm -f "$pack_out" "$tarball"
+    rm -f "$tarball" "$TMP_PACKS/last-pack.json"
   done
 fi
 

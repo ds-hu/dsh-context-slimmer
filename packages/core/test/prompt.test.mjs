@@ -14,8 +14,8 @@ import {
   renderPayload,
   renderRecent,
   selectSystemPrompt,
-} from '../../lib/prompt.js'
-import { CHARS_PER_TOKEN } from '../../lib/plan.js'
+} from '../lib/prompt.js'
+import { CHARS_PER_TOKEN } from '../lib/plan.js'
 
 // Snapshot assertions from docs/research/prompt-final.md §5 (v1.1 baseline,
 // with the Lead-approved R5 rename of the submission tool to the native
@@ -31,7 +31,7 @@ test('English system prompt stays within the parity budget', () => {
   assert.equal(SLIM_SYSTEM_PROMPT_EN.length, 2819)
   const words = SLIM_SYSTEM_PROMPT_EN.split(/\s+/).filter(Boolean).length
   assert.ok(words >= 300 && words <= 500, `English prompt has ${words} words`)
-  assert.match(SLIM_SYSTEM_PROMPT_EN, /structured output/i)
+  assert.equal(SLIM_SYSTEM_PROMPT_EN.includes('structured_output'), true)
 })
 
 test('all required anchors are present', () => {

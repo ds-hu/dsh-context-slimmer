@@ -6,9 +6,9 @@ import {
   applyToolResultReplacement,
   readSurfaceEntries,
   selectTargets,
-} from '../../lib/replace.js'
-import { META_KEY, readSlimMetaFromEvent, STATUS_APPLIED } from '../../lib/events.js'
-import { createFakeSession } from '../helpers/fake-session.mjs'
+} from '../lib/replace.js'
+import { META_KEY, readSlimMetaFromEvent, STATUS_APPLIED } from '../lib/events.js'
+import { createFakeSession } from './helpers/fake-session.mjs'
 
 const trigger = { everyNToolCalls: 8, minChars: 24000, observedCalls: 9, observedChars: 30000 }
 const model = { provider: 'test', model: 'test', inherited: true }
@@ -79,9 +79,9 @@ test('applyPlan appends prune -> replace pairs with item/summary batch metadata'
   assert.equal(result.degraded, false)
 
   // Exactly four appended events: prune, replace, prune, replace.
-  assert.deepEqual(session.events.slice(6).map((event) => event.type), ['compaction/prune', 'tool/result', 'compaction/prune', 'tool/result'])
-  const firstPrune = readSlimMetaFromEvent(session.events[6])
-  const lastPrune = readSlimMetaFromEvent(session.events[8])
+  assert.deepEqual(session.events.slice(4).map((event) => event.type), ['compaction/prune', 'tool/result', 'compaction/prune', 'tool/result'])
+  const firstPrune = readSlimMetaFromEvent(session.events[4])
+  const lastPrune = readSlimMetaFromEvent(session.events[6])
   assert.equal(firstPrune.role, 'item')
   assert.equal(firstPrune.index, 0)
   assert.equal(firstPrune.op, 'drop')
@@ -91,10 +91,10 @@ test('applyPlan appends prune -> replace pairs with item/summary batch metadata'
   assert.equal(lastPrune.items.length, 2)
   assert.equal(lastPrune.totals.items, 2)
   // Summary carries each landed replacement and the real seq of the last one.
-  assert.equal(lastPrune.items[0].replacementSeq, session.events[7].seq)
-  assert.equal(lastPrune.items[1].replacementSeq, session.events[9].seq)
+  assert.equal(lastPrune.items[0].replacementSeq, session.events[5].seq)
+  assert.equal(lastPrune.items[1].replacementSeq, session.events[7].seq)
   // Prune and replacement are adjacent and the prune keeps the official fields.
-  for (const pruneSeq of [6, 8]) {
+  for (const pruneSeq of [4, 6]) {
     assert.equal(session.events[pruneSeq].data.shadowedSeqs.length, 1)
     assert.equal(session.events[pruneSeq + 1].surfaceOp.startSeq, session.events[pruneSeq + 1].sourceEventSeqs[0])
   }

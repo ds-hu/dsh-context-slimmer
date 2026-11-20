@@ -600,7 +600,7 @@ async function main() {
     log('dry-run plan:');
     log(`  session log: ${args.sessionLog || '<missing>'}`);
     log(`  json stream: ${args.jsonStream || '<missing>'}`);
-    log(`  event type:  ${args.eventType}`);
+    log('  protocol:    compaction/prune data.contextSlimmer (role=summary) + tool/result surface replace');
     log(`  artifacts:   ${args.artifactsDir}`);
     log(`  thresholds:  replacements>=${args.minReplacements}, savings>=${args.minSavingsChars} chars, best reduction>=${args.minReductionRatio}`);
     const modulePath = resolveSurfaceModule(args);

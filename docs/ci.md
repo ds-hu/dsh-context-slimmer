@@ -303,12 +303,31 @@ node --check scripts/ci/screenshot.mjs                                # OK
 node scripts/ci/assert-slimming.mjs --self-test                        # SELF-TEST PASS
 for f in .github/workflows/*.yml; do ruby -ryaml -e 'YAML.parse_stream(File.read(ARGV[0]))' "$f"; done  # OK
 bash scripts/ci/scan-secrets.sh                                       # OK: no credential-shaped material
-bash scripts/ci/scan-secrets.sh --dry-run                             # OK
+bash scripts/ci/scan-secrets.sh --publish                             # OK: tarballs clean too
 bash scripts/ci/prepare-profile.sh --dry-run                          # OK (validates wiring)
 bash scripts/ci/run-scenario.sh --dry-run                             # OK, no call
-npm run test:core                                                     # pass (empty until core tests land)
+node scripts/ci/screenshot.mjs --dry-run ...                          # OK
+node scripts/ci/assert-slimming.mjs --dry-run ...                     # OK
+npm run test:core                                                     # 0 tests until core/test lands
 npm run test:module                                                   # pass
 npm run test:pack                                                     # pack dry-run OK
+
+**Real zero-cost integration run** (not a dry-run) against the current packages
+and the installed `dsh 0.2.2-rc.1`:
+
+```bash
+DSH_HOME=/tmp/dsh-ci-home CI_ARTIFACTS_DIR=/tmp/ci-artifacts \
+  bash scripts/ci/prepare-profile.sh --profile ci-headless --template headless --no-probe-model
+```
+
+Result: profile initialized offline → the three workspace packages were
+symlinked into the profile → the bundle was selected → `--dump-config` discovered
+the row `context-slimmer-tool-result` (`@ds-hu/dsh-context-slimmer-tool-result`)
+→ the generated patch (model route, plain-JSONL persistence, isolation rows,
+plugin config from §3) composed and validated → `dsh --profile ci-headless
+--help` booted the composed profile. No network call, no key, no model spend.
+This exercises the exact path `verify.yml` takes up to the paid session; only the
+model call itself remains unverified.
 ```
 
 Additionally verified against real local dsh `0.2.2-rc.1` without any API call:
@@ -329,7 +348,8 @@ Additionally verified against real local dsh `0.2.2-rc.1` without any API call:
 **待验证（首次真实 CI 运行后才能确认）**
 
 1. `@deepseek-ai/dsh@0.2.2-rc.1` install and profile boot **on the GitHub
-   runner with Node 24** (local probe used Node 22).
+   runner with Node 24** (local integration run used Node 22; composition and
+   `--help` boot passed, so only the runner environment differs).
 2. `forkProvider: "fork"` mounting the managed-fork background agent inside the
    headless profile; the child session's native `structured_output` tool call is
    expected there, not in the parent log.
@@ -344,7 +364,8 @@ Additionally verified against real local dsh `0.2.2-rc.1` without any API call:
    (locally verified via a seeded `workspace.json`).
 7. Actual token spend of one run versus the ¥1 estimate (no local real calls
    were made).
-8. `node --test` globs once `packages/core/test/` exists (currently empty).
+8. `node --test` globs once `packages/core/test/` exists (currently empty; the
+   static job treats this as a warning during bring-up).
 9. `dsh plugin --profile ... add <path>` alternative install method
    (`--install-method=dsh-plugin`) is implemented but untested until pnpm is on
    the runner (the workflow default is the symlink method).
@@ -356,7 +377,7 @@ Additionally verified against real local dsh `0.2.2-rc.1` without any API call:
 | Symptom | Cause / fix |
 | --- | --- |
 | `skipping profile bundle` in the e2e logs | dsh version does not satisfy the plugin's `engines.dsh`; pin `dsh_version` in the dispatch |
-| `plugin-record`/`slimmer-prune-record` check fails | the harness rejected the additive `contextSlimmer` field (degraded plain prune) or the trigger did not fire; check `profile-*/cordis.patch.yml` config and `scenario.jsonl` tool count |
+| `slimmer-prune-record` / `slimmer-summary-consistent` fails | the harness rejected the additive `contextSlimmer` field (degraded plain prune), the summary is a no-op/rejected batch, or the trigger did not fire; check `profile-*/cordis.patch.yml` config and `scenario.jsonl` tool count |
 | `derived-context-shrank` fails | the plugin's replacement did not actually shrink content, or the fold resolved nothing; `assert-report.json.metrics.reductions` shows before/after chars |
 | e2e timed out | `timeout 900`; reduce steps (`include_web_search: false`), or raise `timeoutMs`/scenario timeout |
 | UI text missing but logs pass | expected on a UI regression; look at `verify-chat-zh.png`, fix selectors or the locale string; the job stays green by design |

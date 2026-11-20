@@ -108,7 +108,7 @@
 }
 ```
 
-`Z1` 的 fixture 需在 `text` 中放**假** secret（如 `sk-testonly-000000000000`），并在 `expect.textMustContain` 加 `<redacted>`、`textMustNotContainRegex` 加 `sk-[A-Za-z0-9]{8,}`；**不得使用真实 key**。
+`Z1` 的 fixture 需在 `text` 中放**假** secret（如 `sk-<fixture-placeholder>`，不得是任何真实 key 的形态），并在 `expect.textMustContain` 加 `<redacted>`、`textMustNotContainRegex` 加 `sk-[A-Za-z0-9]{8,}`；**不得使用真实 key**。
 
 ---
 

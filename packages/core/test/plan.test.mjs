@@ -8,7 +8,7 @@ import {
   buildPlanJsonSchema,
   estimateTokens,
   validatePlan,
-} from '../../lib/plan.js'
+} from '../lib/plan.js'
 
 const prefix = '[elided by context-slimmer]'
 

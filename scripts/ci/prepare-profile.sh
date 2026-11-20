@@ -554,7 +554,7 @@ if (( DRY_RUN )); then
   log "  entry ids:       ${SLIMMER_ENTRY_IDS:-<discovered from --dump-config>}"
   log "  would run:"
   log "    DSH_HOME=$DSH_HOME dsh --profile $PROFILE --from-default-profile $TEMPLATE --dump-config"
-  log "    link $(printf '%s' "$WORKSPACES_TSV" | wc -l) package(s) into $DSH_HOME/profiles/$PROFILE/node_modules"
+  log "    link $(printf '%s\n' "$WORKSPACES_TSV" | grep -c .) package(s) into $DSH_HOME/profiles/$PROFILE/node_modules"
   log "    write $DSH_HOME/profiles/$PROFILE/cordis.patch.yml, then re-run --dump-config to validate"
   (( PROBE_MODEL )) && log "    probe ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}/models with the CI key (non-billed, no inference)"
   log "dry-run OK (no profile, package, or network mutation performed)"

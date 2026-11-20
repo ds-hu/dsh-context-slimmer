@@ -19,7 +19,7 @@ import {
   summarizeItems,
   summarizeMeta,
   textChars,
-} from '../../lib/events.js'
+} from '../lib/events.js'
 
 const trigger = { everyNToolCalls: 8, minChars: 24000, observedCalls: 9, observedChars: 30000 }
 const model = { provider: 'deepseek', model: 'deepseek-chat', inherited: true }
@@ -98,7 +98,7 @@ test('readSlimMeta is total: unknown versions/shapes return null instead of thro
   assert.equal(readSlimMeta({ v: 2, batchId: 'b', role: 'summary' }), null)
   assert.equal(readSlimMeta({ v: 1, batchId: '', role: 'item' }), null)
   const item = buildItemMeta({ batchId: 'b', index: 0, op: 'drop', charsBefore: 9, charsAfter: 1, toolName: 'bash' })
-  assert.equal(readSlimMeta(item), item)
+  assert.deepEqual(readSlimMeta(item), item)
 })
 
 test('readSlimMetaFromEvent only reads slim compaction/prune events', () => {

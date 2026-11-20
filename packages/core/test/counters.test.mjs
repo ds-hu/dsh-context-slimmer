@@ -10,9 +10,9 @@ import {
   resetCounter,
   shouldTrigger,
   triggerSnapshot,
-} from '../../lib/counters.js'
-import { createFakeSession } from '../helpers/fake-session.mjs'
-import { readSurfaceEntries } from '../../lib/replace.js'
+} from '../lib/counters.js'
+import { createFakeSession } from './helpers/fake-session.mjs'
+import { readSurfaceEntries } from '../lib/replace.js'
 
 test('counter accumulates calls/chars/errors and freezes each state', () => {
   let counter = createCounter()
