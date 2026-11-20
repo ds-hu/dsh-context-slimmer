@@ -21,14 +21,16 @@ import { CHARS_PER_TOKEN } from '../lib/plan.js'
 // with the Lead-approved R5 rename of the submission tool to the native
 // structured_output tool — see docs/dev-notes.md DEV-9).
 test('Chinese system prompt keeps the pinned length and token budget', () => {
-  assert.equal(SLIM_SYSTEM_PROMPT_ZH.length, 1199)
-  assert.equal(Math.ceil(SLIM_SYSTEM_PROMPT_ZH.length / CHARS_PER_TOKEN), 300)
+  // R6 (CI e2e root cause fix): `path=` evidence rule removed; prompts now also
+  // forbid `path=`/URL/`file:line` rewrite annotations in trim text.
+  assert.equal(SLIM_SYSTEM_PROMPT_ZH.length, 1237)
+  assert.equal(Math.ceil(SLIM_SYSTEM_PROMPT_ZH.length / CHARS_PER_TOKEN), 310)
   assert.equal(SLIM_SYSTEM_PROMPT_ZH.includes('structured_output'), true)
   assert.equal(SLIM_SYSTEM_PROMPT_ZH.includes('slim_tool_results'), false)
 })
 
 test('English system prompt stays within the parity budget', () => {
-  assert.equal(SLIM_SYSTEM_PROMPT_EN.length, 2819)
+  assert.equal(SLIM_SYSTEM_PROMPT_EN.length, 2943)
   const words = SLIM_SYSTEM_PROMPT_EN.split(/\s+/).filter(Boolean).length
   assert.ok(words >= 300 && words <= 500, `English prompt has ${words} words`)
   assert.equal(SLIM_SYSTEM_PROMPT_EN.includes('structured_output'), true)
@@ -75,6 +77,9 @@ test('forbidden legacy vocabulary is absent from both prompts', () => {
     assert.equal(prompt.includes('slim_tool_results'), false, 'system prompt must not mention the retired slim_tool_results tool')
   }
   assert.equal(DATA_BOUNDARY.includes('structured_output'), true)
+  // R6: the trim-text reference constraint is present in both prompts.
+  assert.equal(SLIM_SYSTEM_PROMPT_ZH.includes('勿写 path='), true)
+  assert.equal(SLIM_SYSTEM_PROMPT_EN.includes('never write path='), true)
 })
 
 test('tool description and parameter descriptions stay verbatim', () => {

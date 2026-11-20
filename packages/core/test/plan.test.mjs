@@ -90,12 +90,34 @@ test('DEV-3: trim text must be <= min(50% of original, 300 tokens)', () => {
   assert.equal(estimateTokens(1201), 301)
 })
 
-test('rejects fabricated evidence tokens in trim text', () => {
+test('rejects fabricated URL and file:line evidence, but allows rewritten path labels', () => {
   const candidate = [{ index: 0, seq: 1, callId: 'c', toolName: 'read_file', chars: 5000, text: 'opened /src/app.js:42 successfully' }]
-  const fabricated = { summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} read /src/other.js:99` }] }
-  assert.equal(validatePlan(fabricated, candidate).code, 'item-text-fabricated')
-  const real = { summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} read /src/app.js:42` }] }
-  assert.equal(validatePlan(real, candidate).ok, true)
+  const fabricatedLine = { summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} read /src/other.js:99` }] }
+  assert.equal(validatePlan(fabricatedLine, candidate).code, 'item-text-fabricated')
+  const realLine = { summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} read /src/app.js:42` }] }
+  assert.equal(validatePlan(realLine, candidate).ok, true)
+
+  const fabricatedUrl = { summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} see https://example.invalid/nope` }] }
+  assert.equal(validatePlan(fabricatedUrl, candidate).code, 'item-text-fabricated')
+  const realUrl = { summary: 's', items: [{ index: 0, op: 'trim', text: `${prefix} see https://example.com/real` }] }
+  const urlCandidate = [{ index: 0, seq: 1, callId: 'c', toolName: 'web_search', chars: 5000, text: 'result https://example.com/real is relevant' }]
+  assert.equal(validatePlan(realUrl, urlCandidate).ok, true)
+
+  // Regression (CI e2e): `path=` is a rewrite annotation, not a verbatim quote.
+  // A plan that labels the rewritten path must not be rejected as fabricated.
+  const pathCandidate = [{ index: 0, seq: 1, callId: 'c', toolName: 'read_file', chars: 5000, text: 'file contents without any absolute path annotation' }]
+  const pathLabelled = {
+    summary: 's',
+    items: [{ index: 0, op: 'trim', text: `${prefix} read result, path=/abs/fixture-large.txt, original 5000 chars, re-run read_file to restore`, reason: 'bulk' }],
+  }
+  const labelled = validatePlan(pathLabelled, pathCandidate)
+  assert.equal(labelled.ok, true, labelled.ok ? '' : labelled.message)
+  const pathWithLine = {
+    summary: 's',
+    items: [{ index: 0, op: 'trim', text: `${prefix} read /abs/fixture-large.txt:12`, reason: 'bulk' }],
+  }
+  // A path WITH a line number is still the high-risk file:line class.
+  assert.equal(validatePlan(pathWithLine, pathCandidate).code, 'item-text-fabricated')
 })
 
 test('maxItems follows the configured maxTargets, summary is folded and truncated', () => {

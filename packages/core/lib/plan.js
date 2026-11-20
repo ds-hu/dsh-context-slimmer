@@ -92,10 +92,19 @@ export class PlanValidationError extends Error {
 }
 
 /**
- * Collect URL, `path=`, and `file:line` tokens that a trim replacement claims.
+ * Collect URL and `file:line` tokens that a trim replacement claims.
+ *
  * The host cannot check semantics, but it can reject a replacement that names a
- * URL/path/line absent from the original text (conservative fabrication guard,
- * adaptation spec §8.3).
+ * URL or a line number absent from the original text (conservative fabrication
+ * guard, adaptation spec §8.3). Both classes are high-risk: a plausible but
+ * wrong URL/line silently poisons later reasoning.
+ *
+ * Plain paths are deliberately NOT exact-matched, and the old `path=`/`file=`
+ * label rule is gone (R6, CI e2e root cause): `path=/abs/file` is how the model
+ * ANNOTATES a rewritten path, not a verbatim quote of the original text. The
+ * old rule rejected every such legal plan as `item-text-fabricated`, silently
+ * turning the whole feature into a no-op. Paths inside a `file:line` citation
+ * are still validated through the line rule below.
  *
  * @param {string} text Replacement text.
  * @returns {string[]} Substrings that must appear in the original text.
@@ -104,9 +113,6 @@ function claimedEvidenceTokens(text) {
   const tokens = new Set()
   for (const match of text.matchAll(/https?:\/\/[^\s"'`<>）)】]+/gu)) {
     tokens.add(match[0].replace(/[.,;:!?]+$/u, ''))
-  }
-  for (const match of text.matchAll(/(?:path|file)=([^\s;]+)/gu)) {
-    tokens.add(match[1].replace(/[.,;:!?]+$/u, ''))
   }
   for (const match of text.matchAll(/[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:\d+(?:-\d+)?/gu)) {
     tokens.add(match[0])
