@@ -119,3 +119,19 @@
 5. **benchmark 场景 4 改为“两条逐字相同的整条日志输出”**（块内重复 conservative 无法处理）；并保证重复对不在 protectRecent 尾部。
 6. **benchmark 重复次数**：push 默认 R=1（确定性校验点 + 交错模式 B/C/A），`workflow_dispatch` 输入 R 可设 3；结论表述为“非劣演示”，不称统计显著；conservative 若 0 次 drop 视为无效 run，允许重跑一次。
 7. **planner 截断**：conservative 硬门禁要求 diagnostics 无 `planner-truncated` 且至少一次精简；aggressive 不设此门禁。
+
+## 10. 根因更正（用户会话证据，替代 §8 的“思考过长”假设）
+
+**不是上下文窗口不足，也不是“思考本来就很长”**——是我们的 `maxOutputTokens: 2048` 覆盖把**推理 token 和最终输出放在同一个 2048 预算里**，而 fork 子 Agent 继承了主模型 `reasoningEffort: "max"`，于是推理一开就把 2048 用光，`structured_output`/文本一个字都没机会输出。
+
+证据（本机生产 profile 的 15 个 `context-slimmer-*` 规划子会话，`/root/.dsh/sessions/--workspace-...--/context-slimmer-*/session.v4.jsonl.zstd`，用 zstd 解压后逐事件检查）：
+- 每个子会话 `request/header.config` 都是 `{"provider":"opencode-go","model":"deepseek-v4.1-flash","reasoningEffort":"max","maxTokens":2048}`
+- 14/15 子会话 `turn/end.reason.kind == "max-tokens"`，最后一个 assistant message **只有 reasoning block**、没有 text/tool-call
+- 唯一 completed 的那个 produced `reasoning + tool-call`（推理较短，剩余预算够结构化输出）
+
+**修复（正确方向）**：
+1. `model.maxOutputTokens` 默认 **0 = inherit（不发送 maxTokens）**，不设 2048 上限；需要成本上限时用户可在面板设置（如 16384/32768）。
+2. `model.reasoningEffort` 默认 **'' = inherit（跟随主模型）**；不默认 'off'（用户明确要求保留思考）。面板可选 inherit/off/low/medium/high/max。
+3. 截断容错：若 planner 调用以 `max-tokens`/`length` 结束，且本次显式设置了 maxTokens，则**自动重试一次不带 maxTokens（inherit）**；仍截断才 diagnostics 记 `planner-truncated` + no-op。
+4. diagnostics 记录 planner `finishReason`、usage、duration、是否重试；verify/benchmark 断言 conservative 无 `planner-truncated`。
+5. 生产 profile 的 row 保持 disabled，0.2.0 装好并验证后重新启用。
