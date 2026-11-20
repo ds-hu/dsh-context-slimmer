@@ -483,7 +483,7 @@ async function main() {
     // A historical turn can render several collapsed activity groups (read,
     // failed command, web search, …); expand each distinct visible one until the
     // row paints or no further candidate appears.
-    const expandText = /^(已完成，用时|Completed in|已读取|已执行|已搜索|已运行|已调用|已写入|已获取|已发起)/;
+    const expandText = /^(已完成，用时|Completed in|执行了|读取了|搜索了|运行了|已读取|已执行|已搜索|已运行|已调用|已写入|已获取|已发起)/;
     const clickedLabels = new Set();
     for (let round = 0; round < 8 && !rowVisibleAfterExpand; round += 1) {
       if (await measureRow()) break;
@@ -503,8 +503,18 @@ async function main() {
       }
       if (!clickedThisRound) break;
     }
-    if (rowVisibleAfterExpand) {
-      report.session = { ...report.session };
+    // Also honour explicit disclosure controls (aria-expanded=false) when the
+    // activity group is not discoverable by its label text.
+    if (!rowVisibleAfterExpand) {
+      const collapsed = page.locator('[aria-expanded="false"]').filter({ hasText: /已读取|已执行|已搜索|已运行|执行了|读取了|已完成，用时/ });
+      const collapsedCount = await collapsed.count().catch(() => 0);
+      for (let index = 0; index < collapsedCount && !rowVisibleAfterExpand; index += 1) {
+        const control = collapsed.nth(index);
+        if (!(await control.isVisible().catch(() => false))) continue;
+        await control.click({ timeout: 2500 }).catch(() => {});
+        await page.waitForTimeout(500);
+        await measureRow();
+      }
     }
     // Scroll (painted or not) so the screenshot targets the row's area.
     await page.evaluate(() => {
@@ -523,7 +533,28 @@ async function main() {
       },
     };
     if (!rowVisibleAfterExpand) {
-      report.notes.push('slimmer row exists in the DOM but the replayed chat view clips collapsed tool activity; see verify-trajectory.png for the visible slimmed result');
+      // Last-resort layout evidence: which ancestor clips the row to height 0.
+      const paintChain = await page.evaluate(() => {
+        const row = document.querySelector('.ctxslim-row, [data-ctxslimmer-row]');
+        if (row === null) return null;
+        const chain = [];
+        let element = row;
+        for (let depth = 0; depth < 7 && element !== null; depth += 1) {
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          chain.push({
+            tag: element.tagName,
+            cls: String(element.className ?? '').slice(0, 80),
+            h: Math.round(rect.height),
+            display: style.display,
+            overflow: style.overflow,
+            visibility: style.visibility,
+          });
+          element = element.parentElement;
+        }
+        return chain;
+      }).catch(() => null);
+      report.notes.push(`slimmer row exists in the DOM but the replayed chat view clips collapsed tool activity; paint chain: ${JSON.stringify(paintChain)}; see verify-trajectory.png for the visible slimmed result`);
     }
   }
 
