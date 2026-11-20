@@ -97,3 +97,15 @@
 - [ ] benchmark workflow：baseline=conservative=5/5、conservative token 更少、aggressive 对照结果记录
 - [ ] secret scan / pack / 文档同步
 - [ ] 0.2.0 发布 + Release 截图 + 生产 profile 升级
+
+## 8. 追加（运行中发现的回归）：规划器输出被截断
+
+真实生产会话（v0.1.0 已装到本机 profile）暴露：规划子 Agent 思考过长 → 输出 token 上限 → 截断失败，用户一次会话里约 20 次 fork 子 Agent 大多失败。v0.2.0 一并修：
+
+- **规划模型默认低 reasoning**：`model.reasoningEffort` 默认 `'off'`（panel 可改；适配器不接受时重试一次并记 diagnostics）。
+- **输出预算**：`model.maxOutputTokens` 默认 4096（panel 可改）。
+- **极简 prompt**：只输出 JSON，不要解释/思考；指令 ≤ 2500 chars；无法证明安全就返回空计划。
+- **容错解析**：直接 JSON → 围栏/首尾 `{}` 提取；finish reason 为 max-tokens/length 或解析失败时 diagnostics 记 `planner-truncated`/`planner-invalid-json`，主流程 no-op。
+- **可观测**：diagnostics 的 `plan`/`apply` 记录 planner 的 usage（prompt/completion tokens）、durationMs、finishReason，benchmark 汇总。
+- **verify 断言**：e2e 的 diagnostics 中本次保守精简批次必须 `status=applied`（或合法 no-op 且非 truncation），且无 `planner-truncated`。
+- 生产 profile 在 0.2.0 验证通过前临时 `disabled: true`，验证后再启用。
