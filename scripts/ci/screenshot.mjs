@@ -422,16 +422,40 @@ async function capturePluginConfig(page, args, report) {
     : hasConfig === 0
       ? 'config-form-missing'
       : 'fields-missing';
+  // The form is taller than the default viewport and the plugin page scrolls
+  // inside its own container (fullPage does not capture it), so temporarily
+  // enlarge the viewport so the screenshot shows all 14 fields and the save
+  // button, then restore it. DOM assertions above are unaffected.
+  const originalViewport = page.viewportSize();
+  const form = page.locator('[data-ctxslim-config]').first();
+  const formBox = await form.boundingBox().catch(() => null);
+  let screenshotViewport = null;
+  if (formBox && formBox.height > 0) {
+    const width = Math.max(1280, originalViewport?.width ?? 1280);
+    const height = Math.min(4000, Math.ceil(formBox.height + 520));
+    if (!originalViewport || height > originalViewport.height) {
+      const resized = await page.setViewportSize({ width, height }).then(() => true).catch(() => false);
+      if (resized) {
+        screenshotViewport = { width, height };
+        await page.waitForTimeout(700);
+        await form.scrollIntoViewIfNeeded().catch(() => {});
+        await page.waitForTimeout(400);
+      }
+    }
+  }
   report.pluginConfig = {
     status,
     hasRowDetail: (await page.locator('[data-plugin-row-detail]').count().catch(() => 0)) > 0,
     configStatus,
     configNoForm,
     dataFields: allDataFields,
+    formBox,
+    screenshotViewport,
     selectors: [...found.entries()].map(([selector, count]) => ({ selector, count })),
     missing,
   };
   await page.screenshot({ path: join(args.artifactsDir, 'verify-plugin-config.png'), fullPage: true }).catch(() => {});
+  if (screenshotViewport && originalViewport) await page.setViewportSize(originalViewport).catch(() => {});
   report.screenshots.push('verify-plugin-config.png');
   report.pluginConfig.screenshot = 'verify-plugin-config.png';
   if (status !== 'found') warn(`plugin config form incomplete (${status}); missing: ${missing.join(', ') || '<form selector>'}`);

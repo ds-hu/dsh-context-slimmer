@@ -148,6 +148,10 @@ jobs:
           node scripts/ci/benchmark.mjs \
             --repetitions "${BENCHMARK_REPETITIONS:-1}" \
             --write-doc
+          # Keep the generated doc inside the single uploaded artifact root so
+          # upload-artifact does not compute a least common ancestor with the
+          # workspace checkout (which nested the path under home/runner/...).
+          if [ -f docs/benchmark.md ]; then cp docs/benchmark.md "$CI_ARTIFACTS_DIR/benchmark.md"; fi
 
       - name: Publish benchmark to the job summary
         if: always()
@@ -169,9 +173,9 @@ jobs:
               echo
               echo "</details>"
             fi
-            if [ -f docs/benchmark.md ]; then
+            if [ -f "$CI_ARTIFACTS_DIR/benchmark.md" ]; then
               echo
-              echo "Generated docs/benchmark.md (uploaded as an artifact; commit it from the artifact when releasing)."
+              echo "Generated docs/benchmark.md: see \`tmp/ci-artifacts/benchmark.md\` in the benchmark-evidence artifact; copy it to docs/benchmark.md when releasing."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -182,6 +186,5 @@ jobs:
           name: benchmark-evidence-${{ github.run_id }}
           path: |
             /tmp/ci-artifacts
-            docs/benchmark.md
           if-no-files-found: warn
           retention-days: 14

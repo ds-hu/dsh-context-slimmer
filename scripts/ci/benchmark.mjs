@@ -380,7 +380,10 @@ function analyzeDiagnostics(file) {
   const durations = usageRecords.map(durationOf).filter((value) => typeof value === 'number');
   const finishReasons = [...new Set(usageRecords.map(finishOf).filter(Boolean))];
   const truncations = records.filter((record) => isTruncation(record));
-  const retried = records.filter((record) => record?.retried === true || record?.data?.retried === true || /retry|retried/.test(JSON.stringify(record).slice(0, 400)));
+  // Only the explicit boolean flags count: every plan/apply record carries
+  // `"retried":false`, so matching the JSON text would count clean runs as
+  // retried (observed in run 44747543865: conservative retried=3, real 0).
+  const retried = records.filter((record) => record?.retried === true || record?.data?.retried === true);
   const appliedRecords = records.filter((record) => {
     const kind = String(record?.kind ?? record?.type ?? record?.event ?? '').toLowerCase();
     if (/apply/.test(kind)) return true;

@@ -568,7 +568,7 @@ async function evaluate(events, header, args, options) {
         : `${truncations.length} planner truncation record(s): ${truncations.slice(0, 3).map((record) => JSON.stringify(record).slice(0, 240)).join(' | ')}`);
     add('planner-observability', usageRecords.length > 0,
       usageRecords.length > 0
-        ? `${usageRecords.length}/${planRecords.length} planner record(s) carry usage; promptTokens=${plannerSummary.promptTokens}, completionTokens=${plannerSummary.completionTokens}, durationMs=${plannerSummary.durationMs ?? '<missing>'}`
+        ? `usageSources=${usageRecords.length} (${plannerSummary.usageSource}), planRecords=${planRecords.length}; promptTokens=${plannerSummary.promptTokens}, completionTokens=${plannerSummary.completionTokens}, durationMs=${plannerSummary.durationMs ?? '<missing>'}`
         : 'no plan/apply diagnostics record carried planner usage (tokens/durationMs/finishReason); the v0.2 planner should log them',
       false);
   }
