@@ -220,3 +220,22 @@ for d in packages/core packages/tool-result-slimmer .; do (cd "$d" && npm pack -
 ---
 
 **最终结论**：模块 1 的协议与实现**通过独立 QA**（真实 DSH e2e 两次落地成功、离线 56 tests、安全与打包均无阻断项、无未关闭 P0）；**发布前建议关闭 P1-1（timeout 真实性）、P1-2（static 门禁）、P1-3（真实浏览器 UI 验证）、P1-4（e2e 场景确定性）**，其余 P2 为文档/健壮性改进。
+
+---
+
+## 10. 发布后补记（release addendum，2026-11-20 18:10 +08）
+
+本节由 Lead 追加，记录 QA 报告落盘后的收尾修复与最终验证，覆盖 §7.1 的 4 项 P1 状态；不改变 §0 的 PASS 结论。
+
+| P1 | 状态 | 修复/证据 |
+| --- | --- | --- |
+| P1-1 `timeoutMs` 非硬超时 | **已修复** | commit `b52460f`：单一 `AbortController` + 覆盖 start/result 两阶段的 `setTimeout`，`Promise.race` 约束；超时 abort 子激活 → `finally` dispose → `STATUS_FAILED`（no-op）。新增 never-settling `activation.result` 回归测试；`docs/dev-notes.md` DEV-12。离线 **57 pass**（core 41 + module 16）。 |
+| P1-2 static 门禁非致命 | **已修复** | `.github/workflows/verify.yml` 的 Offline tests 改为硬失败（`test:core` / `test:module` / `test:pack` 均 `set -e`）。此后所有 verify run static 全绿。 |
+| P1-3 真实浏览器 UI 行未验证 | **已修复并可视化验证** | run `44715831038`（commit `58b24d1`）：`ui_assert_status=found`、`rowVisibleAfterExpand=true`、`rowBoundingBox={x:514,y:720,w:840,h:28}`、`mainOpened=true`、`consoleErrors=[]`。chat 截图肉眼可见 `已精简工具调用结果 · 1 项 · 释放 24,181 字符`；detail 图可见 `#0 · read · trim · 24,638→457 · 整文件重复内容，可重取`、trigger、model 明细；轨迹图可见 `[elided by context-slimmer]`。4 张图已作为 v0.1.0 Release 资产与 README 配图。 |
+| P1-4 e2e 场景对模型输出脆弱 | **已缓解** | CI 配置 `scripts/ci/slimmer-config.default.json` 增加 `minTargetChars: 2048`，小体积工具结果（如 26 字符的失败输出）不再成为 trim 候选，避免“整单拒绝→静默 no-op”。此后 e2e 连续 3 次绿（44713620169 / 44714586118 / 44715247598 / 44715831038）。模型本身仍有随机性（建议后续把主链路断言与“是否有可精简目标”解耦），但本轮发布证据稳定。 |
+
+发布事实（供后续核对）：
+
+- npm（2026-11-20 09:52Z）：`@ds-hu/dsh-context-slimmer-core@0.1.0`、`@ds-hu/dsh-context-slimmer-tool-result@0.1.0`、`@ds-hu/dsh-context-slimmer@0.1.0` 三个包均发布成功（publish run `44714297451` success）；registry packument 有约 5 分钟传播延迟。
+- GitHub Release `v0.1.0` 已发布，含 4 张 CI 截图资产（最新替换 152,286 / 157,620 / 124,457 / 171,304 B）。
+- 生产 profile `/root/.dsh/profiles/web` 已通过 `dsh plugin --profile web add @ds-hu/dsh-context-slimmer` 安装，`dsh.profile.bundles` 自动追加该 bundle，`--dump-config` 中出现 `context-slimmer-tool-result` row，运行中实例的 Config inspect 已加载该插件（`include:context-slimmer-tool-result`，status `schema`）。

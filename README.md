@@ -110,6 +110,26 @@ Full protocol, safety rules and compatibility fallbacks: [`docs/protocol.md`](do
 - The client half makes no network requests and does not read session content beyond the event
   payload.
 
+## Screenshots (captured from a real DSH run in CI)
+
+All screenshots come from a real DeepSeek Harness instance started in GitHub Actions (real model session + `dsh web`):
+
+The native-looking row in the conversation flow (`已精简工具调用结果 · 1 项 · 释放 24,181 字符`):
+
+![chat row](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-chat-zh.png)
+
+Expanded detail of the applied plan (item / trigger / model):
+
+![detail](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-chat-detail.png)
+
+The trajectory shows what the model actually sees after replacement (`[elided by context-slimmer]`):
+
+![trajectory](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-trajectory.png)
+
+The module in the native Plugins panel (toggle/config per module):
+
+![plugins](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-plugins.png)
+
 ## Development
 
 ```bash

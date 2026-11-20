@@ -85,6 +85,26 @@ bundle patch 会为每个模块插入一行；每一行从 profile 解析自己�
   模型写的一行原因。
 - client 半不发起网络请求，除事件 payload 外不读取 session 内容。
 
+## 界面（CI 中真实运行截图）
+
+三张图均来自 GitHub Actions 里真实启动的 DeepSeek Harness（真实模型会话 + `dsh web`），不是手搓示意图：
+
+对话流中的原生风格行（`已精简工具调用结果 · 1 项 · 释放 24,181 字符`）：
+
+![chat row](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-chat-zh.png)
+
+展开后可看到本次精简明细（item / trigger / model）：
+
+![detail](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-chat-detail.png)
+
+轨迹视图里模型侧看到的就是被替换后的结果（`[elided by context-slimmer]`）：
+
+![trajectory](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-trajectory.png)
+
+原生插件面板中的模块（可独立开关/配置）：
+
+![plugins](https://github.com/ds-hu/dsh-context-slimmer/releases/download/v0.1.0/verify-plugins.png)
+
 ## 开发
 
 ```bash
