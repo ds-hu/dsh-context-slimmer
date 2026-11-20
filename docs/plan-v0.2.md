@@ -109,3 +109,13 @@
 - **可观测**：diagnostics 的 `plan`/`apply` 记录 planner 的 usage（prompt/completion tokens）、durationMs、finishReason，benchmark 汇总。
 - **verify 断言**：e2e 的 diagnostics 中本次保守精简批次必须 `status=applied`（或合法 no-op 且非 truncation），且无 `planner-truncated`。
 - 生产 profile 在 0.2.0 验证通过前临时 `disabled: true`，验证后再启用。
+
+## 9. 裁决（基于 paper-researcher 的 §10 偏差清单）
+
+1. **不保留 20% char cap**（与“整条 drop、可证明安全”冲突）：conservative 的约束改为“单批 drop ≤ min(maxTargets, 候选数) 条 + 每条必须有可校验证据引用（duplicateOf / supersededBy）”；char 比例只作为 benchmark 观测指标。
+2. **superseded 仍只允许“失败 → 同 tool 后续成功”**；stale-read（旧 read 被新 read 覆盖）不放入 conservative（内容可能仍被需要），可在后续 balanced 版本讨论。
+3. **drop 的替换文本必须指向保留副本**：例如 `[elided by context-slimmer] duplicate of call_... (kept) — do not re-read; content unchanged`；禁止写“可重新读取”。
+4. **候选窗口**：selectTargets 内部扫描最近 `max(protectRecent + maxTargets*3, 12)` 条结果，再按证据过滤；避免相邻重复对被 protectRecent 误保护。
+5. **benchmark 场景 4 改为“两条逐字相同的整条日志输出”**（块内重复 conservative 无法处理）；并保证重复对不在 protectRecent 尾部。
+6. **benchmark 重复次数**：push 默认 R=1（确定性校验点 + 交错模式 B/C/A），`workflow_dispatch` 输入 R 可设 3；结论表述为“非劣演示”，不称统计显著；conservative 若 0 次 drop 视为无效 run，允许重跑一次。
+7. **planner 截断**：conservative 硬门禁要求 diagnostics 无 `planner-truncated` 且至少一次精简；aggressive 不设此门禁。
