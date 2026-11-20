@@ -355,9 +355,12 @@ Additionally verified against real local dsh `0.2.2-rc.1` without any API call:
 * `GET /models` probe code paths via `--dry-run` and a local stub.
 
 **Final verification run — 2026-11-20, run
-[44713620169](https://github.com/ds-hu/dsh-context-slimmer/actions/runs/44713620169)
-(commit `b52460f`, all jobs green).** The first full green run resolved the
-bring-up checklist:
+[44715831038](https://github.com/ds-hu/dsh-context-slimmer/actions/runs/44715831038)
+(commit `58b24d1`, all jobs green).** It supersedes the first full green run
+([44713620169](https://github.com/ds-hu/dsh-context-slimmer/actions/runs/44713620169),
+commit `b52460f`) as the release evidence: the slimmer row is now painted and
+asserted in the chat screenshot (`rowVisibleAfterExpand=true`,
+`rowBoundingBox 840×28`, `ui_assert_status=found`). The full checklist:
 
 1. dsh `0.2.2-rc.1` installs and boots on the runner with Node 24 — `Pin and
    install dsh`, both profile preparations and the web server all succeeded.
@@ -375,7 +378,16 @@ bring-up checklist:
    `reasoningEffort=off`, `maxTokens=2048`.
 6. Session visible in the Web GUI sidebar after seeding `workspace.json`;
    `screenshot-report.json` reports `session.status=opened-exact`,
-   `ui_assert_status=found` and `pluginsPanel.status=found`.
+   `ui_assert_status=found`, `rowVisibleAfterExpand=true` and
+   `pluginsPanel.status=found`. `verify-chat-zh.png` visibly shows
+   `已精简工具调用结果 · 1 项 · 释放 24,181 字符`, `verify-chat-detail.png` the
+   expanded item/trigger/model detail, and `verify-trajectory.png` the
+   `[elided by context-slimmer]` replacement; all four images are attached to
+   the `v0.1.0` GitHub Release via `gh release upload --clobber`.
+   The row is painted only after expanding the replayed tool-activity group, so
+   the screenshot script expands every collapsed group (verb-prefixed labels
+   plus `[aria-expanded="false"]`) and verifies true painting with
+   `elementFromPoint` before declaring it visible.
 7. Cost of the run: **52.1K tokens total** (97% cache hits), far below the ¥1
    estimate; the e2e job itself took ~3.5 min.
 8. Offline tests run and pass in the static job (`npm run test:core`,
