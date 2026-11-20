@@ -452,6 +452,66 @@ async function main() {
     log(`UI text found: "${args.uiText}"`);
   }
 
+  // Historical replay collapses tool activity by default: the slimmer row exists
+  // in the DOM but is clipped inside the collapsed turn. Try to expand the turn
+  // summary so the chat screenshot can paint the row; record the outcome either
+  // way (the trajectory screenshot carries the visible evidence regardless).
+  const rowLocator = page.locator('.ctxslim-row, [data-ctxslimmer-row]').first();
+  let rowVisibleAfterExpand = false;
+  let rowBoundingBox = null;
+  const measureRow = async () => {
+    const box = await rowLocator.boundingBox().catch(() => null);
+    if (box === null || box.width <= 0 || box.height <= 0) return false;
+    rowBoundingBox = box;
+    // A nonzero bounding box is not enough: collapsed history keeps the row in
+    // the layout but clips it behind an ancestor with height 0. Hit-test the row
+    // centre to prove it is actually painted, and require it inside the viewport.
+    const painted = await page.evaluate(() => {
+      const row = document.querySelector('.ctxslim-row, [data-ctxslimmer-row]');
+      if (row === null) return false;
+      const rect = row.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const x = Math.min(window.innerWidth - 1, Math.max(0, rect.x + rect.width / 2));
+      const y = Math.min(window.innerHeight - 1, Math.max(0, rect.y + rect.height / 2));
+      const hit = document.elementFromPoint(x, y);
+      return hit !== null && (row.contains(hit) || hit.closest('.ctxslim-row, [data-ctxslimmer-row]') === row);
+    }).catch(() => false);
+    rowVisibleAfterExpand = painted && box.y >= 0 && box.y + box.height <= 1000;
+    return rowVisibleAfterExpand;
+  };
+  if (uiTextFound) {
+    if (!(await measureRow())) {
+      const expandPatterns = [/已完成，用时|Completed in/, /已读取文件|已执行|已搜索|已调用|已运行/];
+      for (const pattern of expandPatterns) {
+        const target = page.getByText(pattern).first();
+        if (!(await target.isVisible().catch(() => false))) continue;
+        await target.click({ timeout: 2500 }).catch(() => {});
+        await page.waitForTimeout(900);
+        if (await measureRow()) break;
+      }
+    }
+    if (rowVisibleAfterExpand) {
+      await page.evaluate(() => {
+        document.querySelector('.ctxslim-row, [data-ctxslimmer-row]')?.scrollIntoView({ block: 'center' });
+      }).catch(() => {});
+      await page.waitForTimeout(600);
+      await measureRow();
+    }
+    report.session = {
+      ...report.session,
+      rowVisibleAfterExpand,
+      rowBoundingBox: rowBoundingBox === null ? null : {
+        x: Math.round(rowBoundingBox.x),
+        y: Math.round(rowBoundingBox.y),
+        width: Math.round(rowBoundingBox.width),
+        height: Math.round(rowBoundingBox.height),
+      },
+    };
+    if (!rowVisibleAfterExpand) {
+      report.notes.push('slimmer row exists in the DOM but the replayed chat view clips collapsed tool activity; see verify-trajectory.png for the visible slimmed result');
+    }
+  }
+
   const chatPath = join(args.artifactsDir, 'verify-chat-zh.png');
   await page.screenshot({ path: chatPath, fullPage: true }).catch((error) => warn(`chat screenshot failed: ${error.message}`));
   report.screenshots.push('verify-chat-zh.png');
