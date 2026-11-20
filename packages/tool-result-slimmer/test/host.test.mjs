@@ -7,7 +7,7 @@ import test from 'node:test'
 import { createFakeSession } from '../../core/test/helpers/fake-session.mjs'
 import { buildPlannerInstruction } from '../../core/lib/prompt.js'
 import { readSlimMetaFromEvent } from '../../core/lib/events.js'
-import { SlimmerHost, estimateMessageTokens, extractPlanFromText, parsePlannerText } from '../lib/index.js'
+import { SlimmerHost, apply, estimateMessageTokens, extractPlanFromText, parsePlannerText } from '../lib/index.js'
 
 /** Resolved-config double; tests override individual fields. */
 function hostConfig(overrides = {}) {
@@ -480,4 +480,31 @@ test('host fallback is conservative-only: balanced empty plan does not force a d
   ctx.llm.streamFactory = textPlanStream({ summary: 'no changes', items: [] })
   await ctx.preStep(preStepPayload(session))
   assert.equal(session.events.filter((event) => event.type === 'compaction/prune').length, 0)
+})
+
+
+test('apply mounts with a legacy forkProvider key and warns instead of going inert', async () => {
+  const ctx = createFakeCtx()
+  const warnings = []
+  ctx.logger.warn = (message) => warnings.push(String(message))
+  apply(ctx, { ...hostConfig({ everyNToolCalls: 2, timeoutMs: 5000 }), forkProvider: 'fork' })
+  assert.equal(warnings.length, 1)
+  assert.equal(warnings[0].includes('forkProvider is deprecated and ignored'), true)
+
+  const session = createFakeSession()
+  await ctx.preStep(preStepPayload(session))
+  liveResult(ctx, session, 'call-0', 'bash', 'legacy config result')
+  assert.equal(ctx.llm.calls.length, 0, 'one call is still below the AND trigger')
+  assert.equal(typeof (ctx.on('session/event')), 'function')
+})
+
+test('apply refuses a genuinely unknown key without mounting', async () => {
+  const ctx = createFakeCtx()
+  const warnings = []
+  ctx.logger.warn = (message) => warnings.push(String(message))
+  apply(ctx, { ...hostConfig({ timeoutMs: 5000 }), unknownKnob: true })
+  assert.equal(warnings.length, 1)
+  assert.equal(warnings[0].includes('unknown configuration key'), true)
+  // No agent/pre-step listener was installed: the row is inert, not crashed.
+  assert.equal(ctx.llm.calls.length, 0)
 })

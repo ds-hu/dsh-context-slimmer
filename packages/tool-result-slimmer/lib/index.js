@@ -921,6 +921,11 @@ export function apply(ctx, rawConfig) {
     ctx.logger?.warn?.(`context-slimmer: invalid configuration, row not mounted: ${errorMessage(error)}`)
     return
   }
+  if (rawConfig !== null && typeof rawConfig === 'object' && 'forkProvider' in rawConfig) {
+    // v0.1.x compatibility: the planner is a direct LLM call since 0.2.0, so the
+    // old fork-provider knob is accepted but ignored (never crashes the row).
+    ctx.logger?.warn?.('context-slimmer: config key forkProvider is deprecated and ignored (the planner no longer uses a fork subagent)')
+  }
   if (!config.enabled) {
     ctx.logger?.info?.('context-slimmer: disabled by configuration')
     return

@@ -113,6 +113,10 @@ export const CONFIG_KEYS = Object.freeze([
   'promptLocale',
   'model',
   'diagnosticsFile',
+  // Legacy v0.1.x key: accepted (and ignored) so old profiles keep mounting.
+  // It is intentionally absent from DEFAULT_CONFIG and from resolveConfig's
+  // frozen result.
+  'forkProvider',
 ])
 
 /** Keys accepted inside `model`. */
@@ -174,6 +178,9 @@ export const Config = z.object({
   ).volatile(),
   promptLocale: z.union([z.const('auto'), z.const('zh'), z.const('en')]).default(DEFAULT_CONFIG.promptLocale).description(
     'Language of the planner prompt: "zh" (default behaviour), "en", or "auto" (currently resolves to Chinese).',
+  ).volatile(),
+  forkProvider: z.string().default('fork').description(
+    'Deprecated and ignored in 0.2.0: the planner is a direct LLM call. Kept only so 0.1.x configs keep mounting.',
   ).volatile(),
   diagnosticsFile: z.string().default(DEFAULT_CONFIG.diagnosticsFile).description(
     'Optional absolute path of a JSONL diagnostics file for this module (empty = disabled, default). Each line is one sanitized event (trigger, llm, plan, validate, apply, no-op); tool-result text is truncated and never stored in full. Intended for CI debugging.',

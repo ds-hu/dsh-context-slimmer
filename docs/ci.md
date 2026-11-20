@@ -18,11 +18,15 @@ mutates the user's real `$DSH_HOME`. It uses a throw-away home
 | Path | Purpose |
 | --- | --- |
 | `.github/workflows/verify.yml` | `static` + `gate` + `e2e` jobs (see §3) |
+| `.github/workflows/benchmark.yml` | v0.2.0 baseline/conservative/aggressive benchmark (see §12.4) |
 | `.github/workflows/publish.yml` | tag push → npm publish order + GitHub Release (see §7) |
 | `scripts/ci/prepare-profile.sh` | builds the temporary DSH profiles, links the local packages, writes the generated `cordis.patch.yml`, probes `GET /models` |
 | `scripts/ci/run-scenario.sh` | runs one real fixed headless session, collects the plain-JSONL log, registers the session for the Web GUI |
 | `scripts/ci/assert-slimming.mjs` | offline hard gate over the session log (`--self-test` for CI) |
-| `scripts/ci/screenshot.mjs` | opens `dsh web`, captures the Chinese chat row + Plugins panel |
+| `scripts/ci/screenshot.mjs` | opens `dsh web`, captures the Chinese chat row + Plugins panel + v0.2.0 config page |
+| `scripts/ci/benchmark.mjs` | composite benchmark: modes, 5 checkpoints, hard gates, generated markdown/report (§12.4) |
+| `scripts/ci/benchmark-scenario.md` + `scripts/ci/bench/fixture/` | deterministic composite benchmark prompt and fixtures (unique/duplicate files, failing command, repeated log) |
+| `scripts/ci/slimmer-config.default.json` | the v0.2.0 conservative row config used by both workflows (see §3) |
 | `scripts/ci/scan-secrets.sh` | credential-shaped-material scanner (also invoked with `--publish`) |
 
 All helpers support `--dry-run` (validate wiring, no network/model cost), use
@@ -35,7 +39,7 @@ All helpers support `--dry-run` (validate wiring, no network/model cost), use
 
 | Name | Used by | Notes |
 | --- | --- | --- |
-| `DEEPSEEK_API_KEY` | `verify.yml` → e2e, `prepare-profile.sh` probe, `run-scenario.sh` | Only value that costs money. Never printed, never written to a file. |
+| `DEEPSEEK_API_KEY` | `verify.yml` → e2e, `benchmark.yml` → benchmark, `prepare-profile.sh` probe, `run-scenario.sh` | Only value that costs money. Never printed, never written to a file. |
 | `NPM_TOKEN` | `publish.yml` | npm automation token with publish rights on `@ds-hu`. Injected as `NODE_AUTH_TOKEN` via `actions/setup-node`'s `registry-url`. |
 
 Both are configured in the `ds-hu/dsh-context-slimmer` repository settings.
@@ -57,9 +61,10 @@ checkout → setup Node **24** (`dsh` declares `engines.node >= 24.9.0`) →
 `npm ci` when `package-lock.json` exists, otherwise `npm install --no-audit --no-fund`
 → `npm run test:core` / `test:module` / `test:pack` (each tolerant during
 bring-up and logged as a warning) → `bash -n scripts/ci/*.sh` →
-`node --check` both `.mjs` helpers → `node assert-slimming.mjs --self-test
---allow-builtin-fold` → both helper `--dry-run`s → Ruby YAML parse of every
-workflow → `scan-secrets.sh`.
+`node --check` every `scripts/ci/*.mjs` → `assert-slimming.mjs --self-test
+--allow-builtin-fold` + `benchmark.mjs --self-test` → `prepare-profile.sh` /
+`run-scenario.sh` / `benchmark.mjs` / `screenshot.mjs` `--dry-run` → Ruby YAML
+parse of every workflow → `scan-secrets.sh`.
 
 The static job intentionally does not need the `@deepseek-ai/dsh` install: every
 check it runs is offline.
@@ -75,11 +80,15 @@ check it runs is offline.
 4. `prepare-profile.sh --profile ci-headless --template headless --probe-model`
    (creates the profile, links the workspace packages, probes `/models`)
 5. `prepare-profile.sh --profile ci-web --template web --no-probe-model`
-6. `run-scenario.sh` — one real headless session (read large fixture → failing
-   `bash false` → optional `web_search` → `bash sleep 25`) so the plugin's
-   asynchronous fork batch has a deterministic window to land before the
-   one-shot session exits
-7. `assert-slimming.mjs` — **hard gate**; a failure fails the job
+6. `run-scenario.sh` — one real headless session that reads the large fixture
+   twice (byte-identical pair), runs eight deterministic small commands, then
+   failing `bash false`, the optional `web_search` and `bash sleep 25`. The
+   conservative AND-trigger (≥12 new results AND ≥24,000 new chars) fires and
+   the `sleep 25` gives the host-side direct planner batch a deterministic
+   window to land before the one-shot session exits.
+7. `assert-slimming.mjs` — **hard gate**: the log protocol checks plus
+   `--require-no-subagents` (zero `subagent/*` events) and `--diagnostics`
+   (`no-planner-truncated` / `planner-observability`); a failure fails the job
 8. `dsh web` (localhost, tokenized URL parsed from its log) +
    `screenshot.mjs` — UI text assertions are non-fatal (see §5)
 9. upload `verify-evidence-<run_id>` with `if: always()`; write the assertion
@@ -92,37 +101,42 @@ check it runs is offline.
 | `model` | `''` | Overrides the probed model id |
 | `dsh_version` | `''` | Exact `@deepseek-ai/dsh` version to install |
 | `node_version` | `24` | Node major used by both jobs |
-| `slimmer_config` | see below | JSON written into the plugin row config |
+| `slimmer_config` | `scripts/ci/slimmer-config.default.json` | JSON written into the plugin row config |
 | `include_web_search` | `true` | Adds one `web_search` step (costs one extra model turn) |
 | `screenshot` | `true` | Starts `dsh web` and captures screenshots |
 | `run_e2e` | `true` | Rehearsal switch: run only the static job |
 
 CI plugin config comes from `scripts/ci/slimmer-config.default.json` (the
-`workflow_dispatch` input `slimmer_config` overrides it when set). Current schema
-defaults overridden so a 3-tool-call scenario triggers exactly one batch:
+`workflow_dispatch` input `slimmer_config` overrides it when set). It carries the
+v0.2.0 conservative defaults so the scenario exercises production behaviour:
 
 ```json
 {
   "enabled": true,
-  "everyNToolCalls": 3,
-  "minChars": 0,
-  "protectRecent": 1,
-  "maxTargets": 6,
-  "minTargetChars": 0,
+  "policy": "conservative",
+  "everyNToolCalls": 12,
+  "minChars": 24000,
+  "protectRecent": 3,
+  "minTargetChars": 4096,
+  "maxTargets": 4,
   "timeoutMs": 180000,
-  "forkProvider": "fork",
+  "includeSubagents": true,
+  "triggerOnErrorOnly": false,
   "promptLocale": "zh",
-  "model": { "provider": "inherit" }
+  "model": {},
+  "diagnosticsFile": "/tmp/ci-artifacts/slimmer-diagnostics.jsonl"
 }
 ```
 
-`minChars: 0` disables the size trigger, so `everyNToolCalls: 3` is the only
-trigger; the scenario produces exactly four tool results (read fixture, failed
-bash, web_search, `sleep 25`), so exactly one batch triggers at the third result
-and the fourth step keeps the process alive long enough for the plugin's
-asynchronous fork batch to land. `protectRecent: 1` keeps the newest result
-safe; `minTargetChars: 0` lets even the small failing-command result be treated
-as a target (extra evidence, no extra cost).
+The trigger is an **AND**: at least 12 new tool results *and* at least 24,000 new
+characters since the last run. The scenario produces 13 calls and ~51k
+characters, so it fires exactly once: the two byte-identical large reads are
+eligible targets (both above `minTargetChars: 4096`), while `protectRecent: 3`
+keeps the newest three results (failed command / web search / sleep, or the last
+three deterministic calls when `include_web_search` is off) out of the target
+set. `model: {}` inherits the main route's provider/model effort and keeps
+the output-token cap at the route default. The diagnostics file is what the hard
+gate reads for the `planner-truncated` and planner-usage assertions.
 
 ---
 
@@ -161,7 +175,7 @@ money.
 
 Model resolution: `GET https://api.deepseek.com/models` with **both**
 `x-api-key` and `Authorization: Bearer` (the official endpoint accepts either;
-fork the probe is non-billed, no inference). If `DEEPSEEK_BASE_URL` is set, the
+for the probe is non-billed, no inference). If `DEEPSEEK_BASE_URL` is set, the
 probe derives the root and tries `<root>/models` and `<root>/v1/models`. The
 chosen model is `DSH_TEST_MODEL` if set (an unlisted id fails fast unless
 `ALLOW_UNLISTED_MODEL=1`), otherwise `deepseek-flash` when listed, otherwise the
@@ -187,6 +201,7 @@ Checks over the plain session log (all hard unless noted):
 | `session-log-contiguous` | events have contiguous seqs 0..N-1 |
 | `session-lifecycle` | session header with id |
 | `tool-activity` | ≥1 tool/call and ≥2 tool/result (original + replacement) events |
+| `no-subagent-events` | zero `subagent/*` events in the main session log (v0.2.0 planner is a direct `ctx.llm.stream()` call, not a managed fork); `--allow-subagents` is only for deliberate regression tests |
 | `slimmer-prune-record` | ≥1 `compaction/prune` with `data.contextSlimmer`; ≥1 `role: "summary"` |
 | `slimmer-summary-consistent` | summary `status: "applied"`, non-empty `items`, every `items[].replacementSeq` is a real tool/result replacement of a smaller result, `totals.charsSaved > 0` |
 | `surface-replacement` | the plugin's tool/result replacements carry `surfaceOp: {op:"replace"}`, and `sourceEventSeqs` resolve back to append-origin events (directly or through an earlier replacement of the same node) |
@@ -198,6 +213,9 @@ Checks over the plain session log (all hard unless noted):
 | `stream-cross-check` | every tool result the headless NDJSON stream reported exists in the log with the same callId |
 | `derived-context-shrank` | folding the log with the installed `@deepseek-ai/dsh-session` `foldSurface` + `deriveEventMessage` shows the replaced tool text materially smaller: total savings ≥ 256 chars and best reduction ≥ 20% |
 | `projected-tool-context-smaller` | folded model-visible tool text < raw append tool-result text |
+| `planner-diagnostics-present` | with `--diagnostics`, the file contains at least one plan/apply/result record; an empty or missing file cannot silently pass the truncation gate |
+| `no-planner-truncated` | with `--diagnostics`, no `planner-truncated` record and no plan record with `finishReason=max-tokens`/`length` (the v0.1.0 regression) |
+| `planner-observability` | warning: plan/apply records carry `usage` (prompt/completion tokens), `durationMs` and `finishReason`; the report aggregates them once per planner call |
 
 The fold uses the installed dsh-session module (authoritative). `--allow-builtin-fold`
 is only for environments without dsh (the static self-test uses it as a fallback).
@@ -205,7 +223,8 @@ is only for environments without dsh (the static self-test uses it as a fallback
 the prune/replacement (must fail), for both fold modes.
 
 `--min-replacements`, `--min-savings-chars`, `--min-reduction-ratio`,
-`--require-shadow-price/--no-require-shadow-price` and `--strict-stream` make the
+`--require-shadow-price/--no-require-shadow-price`, `--strict-stream`,
+`--diagnostics` and `--require-no-subagents/--allow-subagents` make the
 thresholds adjustable **without touching workflow code**.
 
 ### UI text (screenshots)
@@ -217,8 +236,19 @@ link, dismisses startup notices/sign-in, waits up to `SLIMMER_UI_TIMEOUT_MS`
 
 * `verify-chat-zh.png` — full Chinese chat view with the slimming row,
 * `verify-chat-detail.png` — the row after a click (best effort),
+* `verify-trajectory.png` — the trajectory tab showing the replacement text,
 * `verify-plugins.png` — the native Plugins panel (module card/toggle),
+* `verify-plugin-config.png` — the v0.2.0 config page: bundle detail → module row
+  detail, then the form hook `[data-ctxslim-config]` + `data-field` inputs
+  (`everyNToolCalls`, `model.provider`, `model.maxOutputTokens`, …) + save button
+  `[data-ctxslim-save]`. The viewport is temporarily enlarged so the shot shows
+  all 14 fields and the save button; DOM counts are recorded in
+  `screenshot-report.json.pluginConfig`,
 * `verify-sidebar-missing.png` — only when the session is not listed at all.
+
+`screenshot.mjs` also checks that the page does not show a `N 个子智能体` counter
+(`report.subagentCounter`: absent / zero / present / text-present). Both UI
+signals are recorded but non-fatal; the log + diagnostics gate decides pass/fail.
 
 When the row text is missing the script still captures everything, records
 `ui_assert_status: "skipped-timeout"` in `screenshot-report.json`, and exits 0.
@@ -236,19 +266,24 @@ For the script to see the session, `run-scenario.sh` pre-seeds
 **Caches** (`actions/cache@v4`): `~/.npm` (both jobs), `~/.cache/ms-playwright`
 (e2e, Chromium is the slow part).
 
-**Timeouts**: `static` 15 min, `gate` 5 min, `e2e` 45 min. Inside e2e:
-`timeout 900` around the model session, 120 s for the web URL to appear, 45 s for
-the UI row text, 30 s per Playwright navigation step. `concurrency` cancels
-superseded PR runs.
+**Timeouts**: `static` 15 min, `gate` 5 min, `e2e` 45 min, `benchmark` 90 min.
+Inside e2e: `timeout 900` around the model session, 120 s for the web URL to
+appear, 45 s for the UI row text, 30 s per Playwright navigation step.
+`concurrency` cancels superseded PR runs.
 
 **Artifacts** (`verify-evidence-<run_id>`, always, 14 days):
 `verify-session.jsonl` (plain session log), `scenario.jsonl` (headless NDJSON
 stream), `scenario.stderr.log`, `scenario-summary.json`,
 `assert-report.txt` / `assert-report.json`, `screenshot-report.json`, PNGs,
-`web.log`, `workspace-store.json`, `child-sessions/` (every subagent/fork session copied
-whole plus a compact `summary.json` with the child's model, tool calls,
-`structured_output` arguments/results and stop reason), `profile-*/` (composed
-dumps, generated patch, model probe). The assertion report is also echoed to the job summary.
+`web.log`, `workspace-store.json`, `slimmer-diagnostics.jsonl` (planner
+`trigger` / `llm-*` / `plan` / `validate` / `apply` / `no-op` records with
+usage, duration and finish reason), `child-sessions/` (legacy debug copy; the
+v0.2.0 planner is a direct LLM call and opens no subagent session, so this is
+normally absent), `profile-*/` (composed dumps, generated patch, model probe).
+The assertion report is also echoed to the job summary. The benchmark workflow
+uploads `benchmark-evidence-<run_id>` with `benchmark.md`,
+`benchmark-summary.md`, `benchmark-report.json` and the three per-mode run
+directories.
 
 **Diagnostics when the paid step fails**, in order:
 1. `assert-report.txt` in the job summary lists every check with the failing
@@ -284,42 +319,50 @@ Permissions: `contents: write` (release + assets) and `actions: read`
 
 ## 8. Cost estimate (budget ¥10)
 
-One e2e run, default inputs:
+Measured on the v0.2.0 green runs (DeepSeek-Flash pricing):
 
-| Item | Tokens (approx) | Notes |
+| Job | What runs | Measured cost |
 | --- | --- | --- |
-| main agent, turn 1 (system + scenario) | 4–8 k in | prompt cached where possible |
-| main agent, tool turns ×3 | 4–10 k in / <1 k out | fixture read dominates |
-| background fork slim agent | 6–12 k in / <1 k out | sees candidate results + prompt, output is a small plan |
-| title generation etc. | disabled or negligible | `session-title-llm` disabled in the CI profile |
-| **total** | **~20–40 k tokens** | at DeepSeek-Flash pricing this is well under **¥1/run** |
+| `verify` e2e | one main session (13 tool calls, ~51k tool-result chars, ~335k session tokens with ~89% cache hits) + one direct planner call (≈44k prompt / <100 completion tokens) | a few ¥0.01s per run; well under **¥0.2/run** |
+| `benchmark` | three sessions (baseline / conservative / aggressive), R=1 | **¥0.13 total** (baseline ¥0.0216 + conservative ¥0.0606 + aggressive ¥0.0444); R=3 extrapolates to ≈¥0.4 < ¥1 |
+| rehearsals | `run_e2e: false`, dry-runs, self-tests | ¥0 |
 
-`reasoningEffort: off`, `maxTokens: 2048`, `everyNToolCalls: 2`,
-`protectRecent: 1`, one batch, no retries, no exploration, no `web_search`
-unless requested. The ¥10 budget allows well over a dozen runs; day-to-day
-rehearsals use `run_e2e: false` (static only, ¥0).
+The main session spends most of its tokens on the two large fixture reads and
+~89% of the prompt is prefix-cached; the planner prompt is the only new
+inference per batch. `reasoningEffort: off` and `maxTokens: 2048` apply to the
+main session; the planner inherits the route with `model: {}` (no output cap
+override). The ¥10 budget allows dozens of verify runs plus several benchmark
+rounds.
 
 ---
 
 ## 9. Local self-check commands and results
 
-Zero-cost checks run on the current tree (Node 22 locally; CI pins Node 24):
+Zero-cost checks (Node 22 locally; CI pins Node 24). The `static` job runs the
+offline subset on every push:
 
 ```bash
-for f in scripts/ci/*.sh; do bash -n "$f"; done                       # OK
-node --check scripts/ci/assert-slimming.mjs                           # OK
-node --check scripts/ci/screenshot.mjs                                # OK
-node scripts/ci/assert-slimming.mjs --self-test                        # SELF-TEST PASS
+for f in scripts/ci/*.sh; do bash -n "$f"; done
+for f in scripts/ci/*.mjs; do node --check "$f"; done
+node scripts/ci/assert-slimming.mjs --self-test --allow-builtin-fold   # SELF-TEST PASS
+node scripts/ci/benchmark.mjs --self-test                              # SELF-TEST PASS
+CI_ARTIFACTS_DIR=/tmp/ci-dry node scripts/ci/benchmark.mjs --dry-run   # OK, no call
+CI_ARTIFACTS_DIR=/tmp/ci-dry node scripts/ci/screenshot.mjs --dry-run  # OK, no browser
+DSH_HOME=/tmp/dsh-ci-home CI_ARTIFACTS_DIR=/tmp/ci-artifacts \
+  bash scripts/ci/prepare-profile.sh --dry-run                         # OK (validates wiring)
+CI_ARTIFACTS_DIR=/tmp/ci-artifacts bash scripts/ci/run-scenario.sh --dry-run  # OK, no call
 for f in .github/workflows/*.yml; do ruby -ryaml -e 'YAML.parse_stream(File.read(ARGV[0]))' "$f"; done  # OK
-bash scripts/ci/scan-secrets.sh                                       # OK: no credential-shaped material
-bash scripts/ci/scan-secrets.sh --publish                             # OK: tarballs clean too
-bash scripts/ci/prepare-profile.sh --dry-run                          # OK (validates wiring)
-bash scripts/ci/run-scenario.sh --dry-run                             # OK, no call
-node scripts/ci/screenshot.mjs --dry-run ...                          # OK
-node scripts/ci/assert-slimming.mjs --dry-run ...                     # OK
-npm run test:core                                                     # 0 tests until core/test lands
-npm run test:module                                                   # pass
-npm run test:pack                                                     # pack dry-run OK
+bash scripts/ci/scan-secrets.sh                                        # OK: no credential-shaped material
+bash scripts/ci/scan-secrets.sh --publish                              # OK: tarballs clean too
+npm run test:core && npm run test:module && npm run test:pack          # run by the static job
+```
+
+`assert-slimming.mjs --self-test` builds a positive fixture, a negative fixture
+without the prune/replacement, a `subagent/*` negative fixture, and diagnostics
+fixtures (healthy plan/apply → pass; `planner-truncated` → fail; empty file →
+fail). `benchmark.mjs --self-test` builds synthetic baseline and conservative
+sessions and checks checkpoint grading, fold-based tool-text metrics, planner
+aggregation, truncation invalidation and the gate evaluation — all offline.
 
 **Real zero-cost integration run** (not a dry-run) against the current packages
 and the installed `dsh 0.2.2-rc.1`:
@@ -337,9 +380,8 @@ plugin config from §3) composed and validated → `dsh --profile ci-headless
 --help` booted the composed profile. No network call, no key, no model spend.
 This exercises the exact path `verify.yml` takes up to the paid session; only the
 model call itself remains unverified.
-```
 
-Additionally verified against real local dsh `0.2.2-rc.1` without any API call:
+Additionally verified locally without any API call:
 
 * `dsh --version`, `dsh --help`, `dsh headless --help`, `dsh web --help`,
   `dsh plugin --help` — command grammar used by the workflows;
@@ -350,60 +392,59 @@ Additionally verified against real local dsh `0.2.2-rc.1` without any API call:
   `shadow-price-precedes-replace`, `derived-context-shrank` all pass on
   pre-existing built-in pruning events, which validates the checks beyond the
   synthetic fixture;
-* Web GUI selectors (sidebar `data-row-key`, Plugins button, `已精简工具调用结果`
-  locale string) against an isolated local GUI;
+* Web GUI selectors against an isolated local GUI: sidebar `data-row-key`, the
+  Plugins button, the `已精简工具调用结果` locale string, and the v0.2.0 config
+  page hooks (`[data-ctxslim-config]`, the 14 `data-field` inputs,
+  `[data-ctxslim-save]`) plus the absence of a `个子智能体` counter;
 * `GET /models` probe code paths via `--dry-run` and a local stub.
 
-**Final verification run — 2026-11-20, run
-[44715831038](https://github.com/ds-hu/dsh-context-slimmer/actions/runs/44715831038)
-(commit `58b24d1`, all jobs green).** It supersedes the first full green run
-([44713620169](https://github.com/ds-hu/dsh-context-slimmer/actions/runs/44713620169),
-commit `b52460f`) as the release evidence: the slimmer row is now painted and
-asserted in the chat screenshot (`rowVisibleAfterExpand=true`,
-`rowBoundingBox 840×28`, `ui_assert_status=found`). The full checklist:
+**v0.2.0 final verification — the latest green `verify` + `benchmark` runs on
+`main` are the release evidence.** The authoritative numbers live in each run's
+job summary and uploaded artifacts (`verify-evidence-<run_id>`,
+`benchmark-evidence-<run_id>`), not in this file. A green round must show:
 
-1. dsh `0.2.2-rc.1` installs and boots on the runner with Node 24 — `Pin and
-   install dsh`, both profile preparations and the web server all succeeded.
-2. `forkProvider: "fork"` mounts the managed-fork child; the child session
-   (captured under `child-sessions/`) contains exactly one `structured_output`
-   tool call with the JSON plan, and the parent log contains only
-   `subagent/catalog`.
-3. The protocol shape is accepted by this build: 1 × `compaction/prune` with
-   `data.contextSlimmer` (`role=summary`, `status=applied`) + 1 × `tool/result`
-   replacement (`seq 36 ← 17`); `metaLanded=true` (no degradation).
+1. dsh `0.2.2-rc.1` installs and boots on the runner with Node 24: both profile
+   preparations and the `dsh web` server succeed.
+2. The planner is a direct `ctx.llm.stream()` call: the main session log has
+   **zero** `subagent/*` events (no `forkProvider`, no child session), and the
+   `no-subagent-events` check passes. `child-sessions/` is normally empty.
+3. The protocol shape is accepted by this build: ≥1 `compaction/prune` with
+   `data.contextSlimmer` (`role=summary`, `status=applied`) + the matching
+   `tool/result` replacement with its shadow-price prune and
+   `sourceEventSeqs`; `derived-context-shrank` and
+   `projected-tool-context-smaller` pass (v0.2.0 green runs replaced a duplicate
+   read: 24,638 → 122 chars, ~24.5k chars saved).
 4. Row id discovered dynamically = `context-slimmer-tool-result`; nothing is
    hard-coded.
-5. `/models` listed `deepseek-flash` (ctx 1,048,576) and
-   `deepseek-v4-pro`; the scenario used `deepseek-flash` with
-   `reasoningEffort=off`, `maxTokens=2048`.
-6. Session visible in the Web GUI sidebar after seeding `workspace.json`;
-   `screenshot-report.json` reports `session.status=opened-exact`,
-   `ui_assert_status=found`, `rowVisibleAfterExpand=true` and
-   `pluginsPanel.status=found`. `verify-chat-zh.png` visibly shows
-   `已精简工具调用结果 · 1 项 · 释放 24,181 字符`, `verify-chat-detail.png` the
-   expanded item/trigger/model detail, and `verify-trajectory.png` the
-   `[elided by context-slimmer]` replacement; all four images are attached to
-   the `v0.1.0` GitHub Release via `gh release upload --clobber`.
-   The row is painted only after expanding the replayed tool-activity group, so
-   the screenshot script expands every collapsed group (verb-prefixed labels
-   plus `[aria-expanded="false"]`) and verifies true painting with
-   `elementFromPoint` before declaring it visible.
-7. Cost of the run: **52.1K tokens total** (97% cache hits), far below the ¥1
-   estimate; the e2e job itself took ~3.5 min.
-8. Offline tests run and pass in the static job (`npm run test:core`,
-   `test:module`, `test:pack`).
-9. Not yet exercised: `--install-method=dsh-plugin` (still untested) and the
-   `publish.yml` real publish path (needs `NPM_TOKEN` and a `v*` tag; only
-   dry-run/self-checks are covered so far).
+5. `/models` probe resolves `deepseek-flash` (ctx 1,048,576). The scenario uses
+   `deepseek-flash` with `reasoningEffort=off`, `maxTokens=2048`; the planner
+   inherits the main route (`model: {}`) and writes plan/apply records with
+   `usage`, `durationMs`, `finishReason` to `slimmer-diagnostics.jsonl`;
+   `no-planner-truncated` passes (v0.2.0 green runs: ≈44k prompt tokens, ~100
+   completion tokens, `finishReason=stop`, 0 truncations).
+6. Session visible in the Web GUI sidebar after seeding `workspace.json`:
+   `session.status=opened-exact`, `ui_assert_status=found`,
+   `pluginsPanel.status=found`. `verify-chat-zh.png` shows
+   `已精简工具调用结果 · 1 项 · 释放 ~2.4 万字符`; `verify-plugin-config.png`
+   shows the config page with `data-ctxslim-status=ready`, all 14 `data-field`
+   inputs and the save button; `report.subagentCounter` is `absent`.
+7. Benchmark job: baseline and conservative every run 5/5; conservative folded
+   tool text < baseline (first v0.2.0 green run: 59,142 < 89,153, **−33.7%**);
+   conservative planner truncations = 0 and ≥1 drop; total cost ≈¥0.13 < ¥1.
+   The conclusion wording stays “非劣演示（single-run / R=N）”, never statistical
+   significance.
+8. Offline tests pass in the static job (`npm run test:core`, `test:module`,
+   `test:pack`).
+9. Not yet exercised: `--install-method=dsh-plugin` and the `publish.yml` real
+   publish path (needs `NPM_TOKEN` and a `v*` tag; only dry-run/self-checks are
+   covered so far).
 
-**Observed UI detail (not a CI blocker).** In the replayed historical session
-the Web UI paints tool activity collapsed: the plugin row exists in the DOM
-(`.ctxslim-row`, text `已精简工具调用结果…`) and the assertion reports
-`ui_assert_status=found`, but the chat view does not visibly paint the row.
-`verify-trajectory.png` therefore records the visible result
-(`read … → [elided by context-slimmer] …`), alongside `verify-chat-zh.png`
-(the real session, no longer the blank new-session view), `verify-chat-detail.png`
-and `verify-plugins.png` (bundle/plugin row in the native Plugins panel).
+**Observed UI detail.** Older replayed (v0.1.0) sessions painted the plugin row
+only in the DOM until the activity group was expanded; the screenshot script
+still expands every collapsed group (verb-prefixed labels plus
+`[aria-expanded="false"]`) and verifies true painting with `elementFromPoint`
+before declaring the row visible. v0.2.0 green runs show the row directly in the
+chat view (`已精简工具调用结果 · 1 项 · 释放 …`).
 
 ---
 
@@ -445,17 +486,18 @@ plugin bugs:
    the transcript. Built-in compaction summaries cite log-only events
    (`compaction/start`, `compaction/summary`), which is why plugin replacements
    are scoped to `tool/result` surface events.
-7. **A failed/empty background batch is invisible from the parent log.** The
-   plugin's fork batch starts (the parent log records `subagent/catalog` for
-   `childId: context-slimmer-…`) but can end in `no-op`/`rejected`/`failed`
-   without touching the parent transcript, so the only parent-side symptom is
-   `slimmer-prune-record: 0` in the assertion report. The one-shot session does
-   not wait on the batch, so a longer scenario alone does not prove anything.
-   Fix: `run-scenario.sh` now copies every sibling subagent session directory to
-   `child-sessions/` and writes `summary.json` with the child's model, tool
-   calls, `structured_output` arguments/results and stop reason. The scenario
-   keeps its `sleep 25` step (harmless scheduling buffer) but the actionable
-   evidence is the child session.
+7. **A failed/no-op planner batch is invisible from the parent transcript.** The
+   direct planner call can end in `no-op` / `rejected` / `failed` without
+   touching the parent transcript, so the only log-level symptom is
+   `slimmer-prune-record: 0` in the assertion report. Fix: CI configures
+   `diagnosticsFile`, so the artifact keeps the batch's `trigger`, `llm-*`,
+   `plan`, `validate`, `apply` and `no-op` records — the hard gate reads them for
+   `planner-truncated` / usage; `run-scenario.sh` keeps its `sleep 25` step so a
+   background batch has a deterministic window to land before the one-shot
+   session exits. Conservative additionally has a host-side deterministic
+   duplicate fallback when the planner returns an empty plan (plan §9.5).
+   `child-sessions/` is no longer evidence: v0.2.0 opens no subagent session and
+   the gate asserts zero `subagent/*` events.
 8. **Headless sessions are not auto-registered in the Web GUI.** `run-scenario.sh`
    seeds `$DSH_HOME/storages/workspace.json` with the workspace path + session id
    so `screenshot.mjs` can click the sidebar row (there is no deep link).
@@ -465,7 +507,10 @@ plugin bugs:
 | Symptom | Cause / fix |
 | --- | --- |
 | `skipping profile bundle` in the e2e logs | dsh version does not satisfy the plugin's `engines.dsh`; pin `dsh_version` in the dispatch |
-| `slimmer-prune-record` / `slimmer-summary-consistent` fails | the harness rejected the additive `contextSlimmer` field (degraded plain prune), the summary is a no-op/rejected batch, or the trigger did not fire; check `profile-*/cordis.patch.yml` config and `scenario.jsonl` tool count |
+| `slimmer-prune-record` / `slimmer-summary-consistent` fails | the harness rejected the additive `contextSlimmer` field (degraded plain prune), the summary is a no-op/rejected batch, or the trigger did not fire; check `profile-*/cordis.patch.yml` config, `scenario.jsonl` tool count and `slimmer-diagnostics.jsonl` (`trigger`/`no-op`/`llm-error`) |
+| `no-subagent-events` fails | the planner forked a subagent again (v0.1.0 regression); the main log contains `subagent/*` events — check the plan and the host entry wiring |
+| `planner-diagnostics-present` fails | `diagnosticsFile` is unset or points elsewhere than the artifact path (`$CI_ARTIFACTS_DIR/slimmer-diagnostics.jsonl`); an empty file never counts as “no truncation” |
+| `no-planner-truncated` fails | the planner hit its output cap before emitting JSON (`planner-truncated`, often shared with reasoning tokens); lower `reasoningEffort`, raise the planner `maxOutputTokens`, or shorten the prompt |
 | `derived-context-shrank` fails | the plugin's replacement did not actually shrink content, or the fold resolved nothing; `assert-report.json.metrics.reductions` shows before/after chars |
 | e2e timed out | `timeout 900`; reduce steps (`include_web_search: false`), or raise `timeoutMs`/scenario timeout |
 | UI text missing but logs pass | expected on a UI regression; look at `verify-chat-zh.png`, fix selectors or the locale string; the job stays green by design |
@@ -510,9 +555,12 @@ sections where they differ (the historical notes are kept for context).
 - The existing checks are unchanged: prune record, summary consistency,
   `sourceEventSeqs` replacement, shadow-price adjacency, append-only transcript,
   fold-based `derived-context-shrank`, stream cross-check.
-- The child-session (`child-sessions/`) artifact is still captured for debugging
-  but is **no longer an assertion input**: `structured_output` from a fork child
-  is not expected any more.
+- The legacy `child-sessions/` capture is kept only for debugging compatibility
+  and is **not an assertion input**; the v0.2.0 direct planner opens no subagent
+  session, so it is normally empty and no `structured_output` tool call is
+  expected (the `no-subagent-events` check proves the absence).
+- New required **`planner-diagnostics-present`** and **`no-planner-truncated`**
+  checks cover the diagnostics file (see §5); they are hard gates, not advisories.
 
 ### 12.2 `screenshot.mjs` (non-fatal UI evidence)
 
@@ -554,9 +602,11 @@ eight deterministic small calls, runs the expected-failing command and then the
 - Hard gates: baseline & conservative 5/5 every run; conservative folded tool
   text < baseline; conservative planner truncations = 0. `aggressive` is not
   gated.
-- Outputs: `benchmark-report.json`, generated `docs/benchmark.md` (uploaded as
-  artifact; commit it when releasing) and a job-summary table that includes
-  planner prompt/completion tokens, duration, finishReason and truncations.
+- Outputs: `benchmark-report.json`, `benchmark.md` / `benchmark-summary.md`,
+  copied into the single `benchmark-evidence-<run_id>` artifact root
+  (`tmp/ci-artifacts/…`; copy `benchmark.md` to `docs/benchmark.md` when
+  releasing) and a job-summary table that includes planner prompt/completion
+  tokens, duration, finishReason and truncations.
 - Conclusion wording is “非劣演示（single-run / R=N）”, never statistical
   significance (see `docs/research/benchmark-design.md` §5).
 
@@ -566,6 +616,7 @@ eight deterministic small calls, runs the expected-failing command and then the
 bash -n scripts/ci/*.sh
 for f in scripts/ci/*.mjs; do node --check "$f"; done
 node scripts/ci/assert-slimming.mjs --self-test --allow-builtin-fold
+CI_ARTIFACTS_DIR=/tmp/ci-dry node scripts/ci/benchmark.mjs --self-test
 CI_ARTIFACTS_DIR=/tmp/ci-dry node scripts/ci/benchmark.mjs --dry-run
 CI_ARTIFACTS_DIR=/tmp/ci-dry node scripts/ci/screenshot.mjs --dry-run
 ```

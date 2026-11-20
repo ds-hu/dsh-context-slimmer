@@ -49,7 +49,8 @@
     "README.md",
     "README.*.md",
     "LICENSE",
-    "docs"
+    "docs",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "test": "node --test packages/core/test/*.test.mjs packages/tool-result-slimmer/test/*.test.mjs",

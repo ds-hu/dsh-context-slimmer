@@ -1,7 +1,7 @@
 {
   "name": "@ds-hu/dsh-context-slimmer-tool-result",
   "version": "0.2.0",
-  "description": "Tool-result slimmer module of the Context Slimmer bundle: a background fork subagent periodically drops or trims stale tool results for the main agent, while the chat transcript keeps the original tool cards and one extra row reports what was slimmed. Independent Loader row: enable, disable and configure it on its own in the native Plugins panel.",
+  "description": "Tool-result slimmer module of the Context Slimmer bundle: a hidden direct-LLM planner (conservative by default) drops provably redundant tool results, while the chat transcript keeps the original tool cards and one extra row reports what was slimmed. Independent Loader row: enable, disable and configure it in the native Plugins panel.",
   "type": "module",
   "publishConfig": {
     "access": "public"

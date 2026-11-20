@@ -76,6 +76,15 @@ bundle patch 会为每个模块插入一行；每一行从 profile 解析自己�
 
 完整协议、安全规则与兼容降级： [`docs/protocol.md`](docs/protocol.md)、[`docs/architecture.md`](docs/architecture.md)、[`docs/dev-notes.md`](docs/dev-notes.md)。
 
+## 从 0.1.0 升级
+
+- 默认策略改为 `conservative`：只删除可证明冗余的内容（重复读取、被后续成功重试覆盖的失败、空输出）。trim 需显式设 `policy: balanced`/`aggressive`。
+- `model.maxOutputTokens` 默认 `0`（跟随模型默认）。若你在 0.1.0 里设过小上限（如 `2048`）请重置——该上限同时覆盖推理 token，曾导致规划器截断。
+- `model.reasoningEffort` 默认 `inherit`（保留当前模型的思考强度），不再固定。
+- `forkProvider` 配置键已移除：规划器改为直调 LLM。0.1.0 配置里残留该键仍可挂载（兼容接受并忽略，附弃用警告），建议从 profile patch 删除。
+- 子 Agent 会话默认也会被精简（`includeSubagents: true`）；只想处理根 Agent 时设为 `false`。
+- 运行 `dsh plugin --profile <profile> add @ds-hu/dsh-context-slimmer@0.2.0` 后重载 profile（或重启），确保 host 与 client 两半都更新。
+
 ## Benchmark
 
 CI benchmark 在同一确定性场景上对比三种模式：baseline（插件 disabled）、`conservative`（默认）、`aggressive`，场景含 5 个精确事实校验点。硬门禁要求 `conservative` 保住全部 5 个事实、折叠后的工具文本明显少于 baseline、且规划器截断次数为 0。结果由 [`.github/workflows/benchmark.yml`](.github/workflows/benchmark.yml) 生成并发布到 [`docs/benchmark.md`](docs/benchmark.md)（单次结果仅作方向性证据，不宣称统计显著）。

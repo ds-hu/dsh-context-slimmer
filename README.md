@@ -107,6 +107,23 @@ config section of the profile `cordis.patch.yml`.
 Full protocol, safety rules and compatibility fallbacks: [`docs/protocol.md`](docs/protocol.md),
 [`docs/architecture.md`](docs/architecture.md) and [`docs/dev-notes.md`](docs/dev-notes.md).
 
+## Upgrading from 0.1.0
+
+- The default policy is now `conservative`: only provably redundant drops (duplicate reads, results
+  superseded by a later successful retry, empty outputs). Trimming is opt-in via
+  `policy: balanced`/`aggressive`.
+- `model.maxOutputTokens` now defaults to `0` = model default. If your 0.1.0 config set a small cap
+  (e.g. `2048`), reset it — that cap also covers reasoning tokens and used to truncate the planner.
+- `model.reasoningEffort` defaults to `inherit` (the planner keeps the current model's thinking
+  effort) instead of being pinned.
+- The `forkProvider` config key is gone; the planner is a direct LLM call. 0.1.0 configs that still
+  contain it keep mounting (the key is accepted and ignored with a deprecation warning), but you can
+  delete it from the profile patch.
+- Subagent sessions are slimmed by default (`includeSubagents: true`); set it to `false` for
+  root-agent-only slimming.
+- Run `dsh plugin --profile <profile> add @ds-hu/dsh-context-slimmer@0.2.0` and reload the profile (or
+  restart it) so both host and client halves update.
+
 ## Benchmark
 
 A CI benchmark compares the plugin disabled (baseline), `conservative` (default) and `aggressive` on

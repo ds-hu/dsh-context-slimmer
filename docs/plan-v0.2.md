@@ -98,6 +98,8 @@
 - [ ] secret scan / pack / 文档同步
 - [ ] 0.2.0 发布 + Release 截图 + 生产 profile 升级
 
+> **注意（§1 部分内容已被 §10/§11 superseded）**：本文档保留决策历史。§1 早期草案里的 `inject:['tools','llm']`、`tools: session.requestHeader()?.tools`、`purpose:'compaction'`、`maxTokens ?? 2048` 均**未按原样实现**；最终实现以 `docs/architecture.md` v2.0 与 `docs/dev-notes.md` DEV-14/DEV-17 为准（inject 只有 `llm`；不传 `tools`/`purpose`；默认不传 `maxTokens`；`reasoningEffort` 默认 inherit）。§8 的“默认 off/4096”同样被 §10 根因更正取代。
+
 ## 8. 追加（运行中发现的回归）：规划器输出被截断
 
 真实生产会话（v0.1.0 已装到本机 profile）暴露：规划子 Agent 思考过长 → 输出 token 上限 → 截断失败，用户一次会话里约 20 次 fork 子 Agent 大多失败。v0.2.0 一并修：

@@ -209,3 +209,7 @@ CI verify 彩排暴露：两条 24638-char `read_file` 结果**逐字相同**、
 - **保守兜底**：planner 返回空 items 且 `policy==='conservative'` 时，宿主用同一确定性重复组生成 drop 计划（`evidence.kind='duplicate'` + `duplicateOf` 指向保留副本 + `reason='重复读取（宿主判定）'`），**再走同一个 `validatePlan` 保守校验**，通过才 apply；诊断 `validate`/`apply` 带 `source:'host-fallback'`，保留 planner 的 finishReason/usage/durationMs/retried。无可证明重复组 → 维持 no-op。只 drop 较早副本、绝不动 RECENT/protectRecent、不同时 drop 一对的两条；balanced/aggressive 不启用兜底。
 - **证据池扩展**：`validatePlan(..., {keptResults})` 允许 duplicate/superseded 的引用指向当前 surface 上未入选 CANDIDATES 的保留结果（例如 RECENT 中的副本），但仍禁止引用本批被 drop 的条目。
 - 测试：core 新增重复扫描/大小过滤/不同 tool/失败结果排除/保留较晚/RECENT 保留副本/不同时 drop 两条、hint 渲染与 prompt 锚点、长度上限；host 新增 hint 被模型照抄的正常路径、空计划+重复→兜底 applied（诊断 source/usage/finishReason）、空计划+无重复→no-op、balanced 空计划不兜底。
+
+## DEV-18 v0.1.x 配置兼容：legacy `forkProvider` 接受并忽略
+
+v0.1.0 的用户 profile/patch 里可能仍带 `forkProvider: 'fork'`。v0.2.0 的 `CONFIG_KEYS` 原先不含它 → `resolveConfig` 抛 `unknown-config-key` → `apply` 兜底 warn+return → row 静默 inert（用户升级后功能“消失”）。兼容策略：`CONFIG_KEYS` 与 `Config` schema 保留 `forkProvider`（schema 默认 `'fork'`、description 标注 “Deprecated and ignored in 0.2.0: the planner is a direct LLM call”），任意 legacy 值都接受；`resolveConfig` 的冻结返回对象**不含**该键（内部配置保持干净，DEFAULT_CONFIG 也不含）。host `apply` 检测原始输入含该键时输出一次 deprecation warning（不 crash、不阻止挂载）。真正未知的键仍抛 `unknown-config-key` 并走 apply 的 inert 兜底。测试：core 覆盖解析成功/无键/任意值/volatile 引用解包/未知键仍拒绝；host 覆盖带 legacy 键正常安装 + warn，未知键 inert 不崩。

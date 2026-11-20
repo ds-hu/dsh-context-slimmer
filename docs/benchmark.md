@@ -1,6 +1,6 @@
 # Benchmark — conservative 默认策略的非劣演示（v0.2.0 / issue #2）
 
-- 生成：benchmark run 44749045128（commit aeb0c61）；artifact 内另附 benchmark-report.json
+- 生成：benchmark run 44750200676（commit 29bb89d）；artifact 内另附 benchmark-report.json
 - 模型：`deepseek-flash`；重复次数：R=1（模式交错 B/C/A）；场景：`scripts/ci/benchmark-scenario.md`
 - fixture：`unique.txt` (26570 B, sha256:bddb339222b8…)，`duplicate.txt` (23560 B, sha256:38afc7ab4b05…)，`verify.mjs` (402 B, sha256:1519252a3a09…)，`log.mjs` (573 B, sha256:59479014a834…)
 - 结论：**非劣演示（single-run）**——baseline 与 conservative 每次运行 5/5、conservative 折叠后工具文本更少；这不是统计显著性结论。
@@ -9,17 +9,17 @@
 
 | 模式 | 运行 | 校验点 | folded 工具文本（中位） | raw 工具文本（中位） | 重复 read（中位） | billed tokens（中位） | cost ¥（中位） | drops/trims | planner 截断 |
 | :-- | --: | :-- | --: | --: | --: | --: | --: | :-- | --: |
-| baseline | baseline-r1 | 5 | 89153 | 89153 | 1 | 14182 | 0.0216 | 0/0 | 0 |
-| conservative | conservative-r1 | 5 | 59142 | 89153 | 1 | 47140 | 0.0606 | 2/0 | 0 |
-| aggressive | aggressive-r1 | 5 | 36778 | 89153 | 1 | 35573 | 0.0444 | 0/2 | 0 |
+| baseline | baseline-r1 | 5 | 89153 | 89153 | 1 | 15159 | 0.0271 | 0/0 | 0 |
+| conservative | conservative-r1 | 5 | 59142 | 89153 | 1 | 47238 | 0.0608 | 2/0 | 0 |
+| aggressive | aggressive-r1 | 5 | 36536 | 89153 | 1 | 34985 | 0.0427 | 0/2 | 0 |
 
 ## 2. planner 开销（diagnostics plan/apply）
 
 | 模式 | plan 调用 | prompt tokens | completion tokens | durationMs | finishReason | 截断 |
 | :-- | --: | --: | --: | --: | :-- | --: |
 | baseline | 0 | 0 | 0 | 0 | - | 0 |
-| conservative | 1 | 56659 | 112 | 1489 | stop | 0 |
-| aggressive | 4 | 84833 | 834 | 10055 | stop | 0 |
+| conservative | 1 | 56666 | 114 | 2097 | stop | 0 |
+| aggressive | 3 | 81386 | 785 | 6884 | stop | 0 |
 
 ## 3. 每次运行明细
 
@@ -27,7 +27,7 @@
 | :-- | :-- | :-- | :-- | :-- | :-- | :-- | --: | --: | --: | --: | --: | :-- |
 | baseline-r1 | yes | ✅ | ✅ | ✅ | ✅ | ✅ | 5/5 | 89153 | 89153 | 0 | 0 | - |
 | conservative-r1 | yes | ✅ | ✅ | ✅ | ✅ | ✅ | 5/5 | 59142 | 89153 | 2 | 0 | stop |
-| aggressive-r1 | yes | ✅ | ✅ | ✅ | ✅ | ✅ | 5/5 | 36778 | 89153 | 0 | 0 | stop |
+| aggressive-r1 | yes | ✅ | ✅ | ✅ | ✅ | ✅ | 5/5 | 36536 | 89153 | 0 | 0 | stop |
 
 ## 4. 门禁
 

@@ -48,7 +48,7 @@ All notable changes to the `@ds-hu/dsh-context-slimmer` bundle. Packages are ver
 | :-- | :-- | --: | :-- | --: |
 | baseline（插件 disabled） | 5/5 | 89,153 字符 | 0/0 | 0 |
 | conservative（默认） | 5/5 | 59,142 字符（-33.7%） | 2/0 | 0 |
-| aggressive（仅报告） | 5/5 | 36,778 字符（-58.7%） | 0/2 | 0 |
+| aggressive（仅报告） | 5/5 | 36,536 字符（-59.0%） | 0/2 | 0 |
 
 详见 [`docs/benchmark.md`](docs/benchmark.md)。
 
@@ -59,6 +59,7 @@ All notable changes to the `@ds-hu/dsh-context-slimmer` bundle. Packages are ver
 - 若你在 v0.1.0 里显式设置过 `model.maxOutputTokens`（例如 2048），请改成 `0` 或足够大的值：
   该上限包含推理 token，过小会导致规划器截断。
 - 子 Agent 会话默认也会被精简；如需只处理根 Agent，设置 `includeSubagents: false`。
+- `forkProvider` 配置键已移除（v0.2 规划器是直调 LLM）。0.1.0 配置里残留该键仍可正常挂载：兼容接受并忽略，日志会输出弃用警告；建议从 profile patch 删除。
 
 ## v0.1.0 — 2026-11-19
 

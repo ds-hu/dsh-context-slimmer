@@ -220,3 +220,23 @@ test('unwrapVolatileDeep recurses through arrays/plain objects and keeps other v
   assert.throws(() => resolveConfig({ policy: volatileRef('yolo') }), (error) => error.code === 'bad-config')
   assert.throws(() => resolveConfig({ model: { model: volatileRef(7) } }), (error) => error.code === 'bad-config')
 })
+
+
+test('v0.1.x forkProvider is accepted, ignored and absent from the resolved config', () => {
+  const config = resolveConfig({ forkProvider: 'fork', policy: 'aggressive' })
+  assert.equal('forkProvider' in config, false)
+  assert.equal(config.policy, 'aggressive')
+  assert.deepEqual(Object.keys(config).sort(), [...Object.keys(DEFAULT_CONFIG)].sort())
+
+  // The schema also accepts it (already-parsed Loader configs and raw patch configs).
+  const parsed = Config({ forkProvider: 'fork' })
+  assert.equal(typeof parsed.forkProvider.get, 'function')
+  assert.equal(parsed.forkProvider.get(), 'fork')
+
+  // Any legacy value is tolerated: the key no longer carries meaning.
+  assert.equal(resolveConfig({ forkProvider: 'whatever' }).policy, 'conservative')
+  // Volatile-wrapped legacy values from the Loader are unwrapped before validation.
+  assert.equal('forkProvider' in resolveConfig({ forkProvider: volatileRef('fork') }), false)
+  // Genuinely unknown keys still fail loudly.
+  assert.throws(() => resolveConfig({ forkProvider: 'fork', nope: true }), (error) => error instanceof ConfigError && error.code === 'unknown-config-key')
+})
