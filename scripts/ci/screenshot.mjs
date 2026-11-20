@@ -480,23 +480,38 @@ async function main() {
     return rowVisibleAfterExpand;
   };
   if (uiTextFound) {
-    if (!(await measureRow())) {
-      const expandPatterns = [/已完成，用时|Completed in/, /已读取文件|已执行|已搜索|已调用|已运行/];
-      for (const pattern of expandPatterns) {
-        const target = page.getByText(pattern).first();
-        if (!(await target.isVisible().catch(() => false))) continue;
-        await target.click({ timeout: 2500 }).catch(() => {});
-        await page.waitForTimeout(900);
+    // A historical turn can render several collapsed activity groups (read,
+    // failed command, web search, …); expand each distinct visible one until the
+    // row paints or no further candidate appears.
+    const expandText = /^(已完成，用时|Completed in|已读取|已执行|已搜索|已运行|已调用|已写入|已获取|已发起)/;
+    const clickedLabels = new Set();
+    for (let round = 0; round < 8 && !rowVisibleAfterExpand; round += 1) {
+      if (await measureRow()) break;
+      const candidates = page.getByText(expandText);
+      const count = await candidates.count().catch(() => 0);
+      let clickedThisRound = false;
+      for (let index = 0; index < count; index += 1) {
+        const candidate = candidates.nth(index);
+        if (!(await candidate.isVisible().catch(() => false))) continue;
+        const label = (await candidate.innerText().catch(() => '')).trim().slice(0, 80);
+        if (label.length === 0 || clickedLabels.has(label)) continue;
+        clickedLabels.add(label);
+        await candidate.click({ timeout: 2500 }).catch(() => {});
+        clickedThisRound = true;
+        await page.waitForTimeout(700);
         if (await measureRow()) break;
       }
+      if (!clickedThisRound) break;
     }
     if (rowVisibleAfterExpand) {
-      await page.evaluate(() => {
-        document.querySelector('.ctxslim-row, [data-ctxslimmer-row]')?.scrollIntoView({ block: 'center' });
-      }).catch(() => {});
-      await page.waitForTimeout(600);
-      await measureRow();
+      report.session = { ...report.session };
     }
+    // Scroll (painted or not) so the screenshot targets the row's area.
+    await page.evaluate(() => {
+      document.querySelector('.ctxslim-row, [data-ctxslimmer-row]')?.scrollIntoView({ block: 'center' });
+    }).catch(() => {});
+    await page.waitForTimeout(700);
+    if (!rowVisibleAfterExpand) await measureRow();
     report.session = {
       ...report.session,
       rowVisibleAfterExpand,
