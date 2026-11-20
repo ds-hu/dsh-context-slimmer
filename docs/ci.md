@@ -245,8 +245,10 @@ superseded PR runs.
 `verify-session.jsonl` (plain session log), `scenario.jsonl` (headless NDJSON
 stream), `scenario.stderr.log`, `scenario-summary.json`,
 `assert-report.txt` / `assert-report.json`, `screenshot-report.json`, PNGs,
-`web.log`, `workspace-store.json`, `profile-*/` (composed dumps, generated patch,
-model probe). The assertion report is also echoed to the job summary.
+`web.log`, `workspace-store.json`, `child-sessions/` (every subagent/fork session copied
+whole plus a compact `summary.json` with the child's model, tool calls,
+`structured_output` arguments/results and stop reason), `profile-*/` (composed
+dumps, generated patch, model probe). The assertion report is also echoed to the job summary.
 
 **Diagnostics when the paid step fails**, in order:
 1. `assert-report.txt` in the job summary lists every check with the failing
@@ -417,14 +419,17 @@ plugin bugs:
    the transcript. Built-in compaction summaries cite log-only events
    (`compaction/start`, `compaction/summary`), which is why plugin replacements
    are scoped to `tool/result` surface events.
-7. **One-shot sessions can exit before the plugin's async batch lands.** The
-   plugin schedules its fork batch asynchronously after the trigger; a headless
-   one-shot run may finish its final step and exit first, so the same CI config
-   produced a batch in one run and no `contextSlimmer` events in the next. Fix:
-   the scenario now includes a `sleep 25` bash step *after* the trigger point
-   (threshold `everyNToolCalls: 3` fires on the third result, the sleep is the
-   fourth), giving the fork child a deterministic window; the assert failure
-   message makes this obvious (`slimmer-prune-record: 0 ...`).
+7. **A failed/empty background batch is invisible from the parent log.** The
+   plugin's fork batch starts (the parent log records `subagent/catalog` for
+   `childId: context-slimmer-…`) but can end in `no-op`/`rejected`/`failed`
+   without touching the parent transcript, so the only parent-side symptom is
+   `slimmer-prune-record: 0` in the assertion report. The one-shot session does
+   not wait on the batch, so a longer scenario alone does not prove anything.
+   Fix: `run-scenario.sh` now copies every sibling subagent session directory to
+   `child-sessions/` and writes `summary.json` with the child's model, tool
+   calls, `structured_output` arguments/results and stop reason. The scenario
+   keeps its `sleep 25` step (harmless scheduling buffer) but the actionable
+   evidence is the child session.
 8. **Headless sessions are not auto-registered in the Web GUI.** `run-scenario.sh`
    seeds `$DSH_HOME/storages/workspace.json` with the workspace path + session id
    so `screenshot.mjs` can click the sidebar row (there is no deep link).

@@ -267,6 +267,105 @@ case "$SESSION_LOG" in
 esac
 log "plain session log: $VERIFY_SESSION_JSONL ($(wc -l < "$VERIFY_SESSION_JSONL") events)"
 
+# Collect subagent (fork) sessions. The plugin runs its batch in a child session;
+# when a batch fails or returns an empty plan, ONLY the child session log shows
+# why, and the one-shot headless process exits without any operator-visible
+# trace. Copy every sibling session directory (fresh CI home => main + children
+# only) and write a compact summary for the artifact.
+CHILD_SESSIONS_DIR="$CI_ARTIFACTS_DIR/child-sessions"
+rm -rf "$CHILD_SESSIONS_DIR"
+mkdir -p "$CHILD_SESSIONS_DIR"
+node --input-type=module - "$DSH_HOME/sessions" "$SESSION_DIR" "$CHILD_SESSIONS_DIR" <<'CHILDNODE'
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+
+const [sessionsRoot, mainSessionDir, childRoot] = process.argv.slice(2);
+const realMain = (() => { try { return fs.realpathSync(mainSessionDir); } catch { return path.resolve(mainSessionDir); } })();
+const readLog = (dir) => {
+  let entries = [];
+  try { entries = fs.readdirSync(dir); } catch { return undefined; }
+  const plain = entries.filter((name) => /^session\.v.*\.jsonl$/.test(name) || name === 'session.jsonl').sort().reverse();
+  const compressed = entries.filter((name) => /^session\.v.*\.jsonl\.zstd$/.test(name)).sort().reverse();
+  const pick = (name) => path.join(dir, name);
+  if (plain.length > 0) return { path: pick(plain[0]), text: fs.readFileSync(pick(plain[0]), 'utf8') };
+  if (compressed.length > 0) {
+    const result = spawnSync('zstd', ['-dc', pick(compressed[0])], { maxBuffer: 256 * 1024 * 1024 });
+    if (result.status === 0) return { path: pick(compressed[0]), text: result.stdout.toString('utf8') };
+  }
+  return undefined;
+};
+const parseEvents = (text) => text.split('\n').filter((line) => line.trim() !== '').map((line) => { try { return JSON.parse(line); } catch { return undefined; } }).filter(Boolean);
+const truncate = (value, limit = 4096) => (typeof value === 'string' && value.length > limit ? `${value.slice(0, limit)}\n…[truncated ${value.length - limit} chars]` : value);
+const textOf = (message) => {
+  if (!message || !Array.isArray(message.content)) return '';
+  return message.content.map((block) => (block && typeof block.text === 'string' ? block.text : '')).join('');
+};
+
+const children = [];
+let workspaceDirs = [];
+try { workspaceDirs = fs.readdirSync(sessionsRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => path.join(sessionsRoot, entry.name)); } catch { /* none */ }
+for (const workspaceDir of workspaceDirs) {
+  let sessionDirs = [];
+  try { sessionDirs = fs.readdirSync(workspaceDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => path.join(workspaceDir, entry.name)); } catch { continue; }
+  for (const sessionDir of sessionDirs) {
+    const real = (() => { try { return fs.realpathSync(sessionDir); } catch { return path.resolve(sessionDir); } })();
+    if (real === realMain) continue;
+    const log = readLog(sessionDir);
+    if (log === undefined) continue;
+    const events = parseEvents(log.text);
+    const header = events.find((event) => event.type === 'session') ?? events[0] ?? {};
+    const sessionId = path.basename(sessionDir);
+    const origin = header.origin ?? header.data?.origin ?? (typeof header.parentSessionId === 'string' ? 'subagent' : (header.delegationDepth > 0 ? 'subagent' : undefined));
+    const modelEvent = events.find((event) => event.type === 'request/header' && event.data && typeof event.data.model === 'string');
+    const toolCalls = events.filter((event) => event.type === 'tool/call');
+    const toolResults = events.filter((event) => event.type === 'tool/result');
+    const structuredCalls = toolCalls.filter((event) => (event.data?.name ?? event.data?.toolName) === 'structured_output');
+    const structured = structuredCalls.map((call) => {
+      const result = toolResults.find((event) => event.data?.message?.toolCallId === call.data?.callId);
+      return {
+        callId: call.data?.callId ?? null,
+        arguments: truncate(call.data?.arguments ?? call.data?.args ?? ''),
+        result: truncate(textOf(result?.data?.message) || (typeof result?.data?.message?.content === 'string' ? result.data.message.content : '')),
+        resultSeq: result?.seq ?? null,
+      };
+    });
+    const assistantMessages = events.filter((event) => event.type === 'assistant/message');
+    const finalMessage = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : undefined;
+    const turnEnd = [...events].reverse().find((event) => event.type === 'turn/end');
+    const copyDir = path.join(childRoot, sessionId);
+    fs.mkdirSync(copyDir, { recursive: true });
+    try { fs.cpSync(sessionDir, copyDir, { recursive: true }); } catch { /* best effort copy */ }
+    children.push({
+      sessionId,
+      origin: origin ?? 'unknown',
+      header: { version: header.version ?? null, cwd: header.cwd ?? null, delegationDepth: header.delegationDepth ?? null, createdAt: header.createdAt ?? null },
+      model: modelEvent?.data?.model ?? header.model ?? null,
+      eventCount: events.length,
+      firstEventType: events[0]?.type ?? null,
+      toolCallCount: toolCalls.length,
+      toolNames: [...new Set(toolCalls.map((event) => event.data?.name ?? event.data?.toolName).filter(Boolean))],
+      structuredOutputCalls: structured,
+      finalAssistantText: truncate(textOf(finalMessage?.data?.message)),
+      stopReason: turnEnd?.data?.reason ?? turnEnd?.data?.stopReason ?? null,
+      logFile: path.relative(childRoot, copyDir),
+    });
+  }
+}
+fs.mkdirSync(childRoot, { recursive: true });
+fs.writeFileSync(path.join(childRoot, 'summary.json'), JSON.stringify({ generatedAt: new Date().toISOString(), count: children.length, children }, undefined, 2) + '\n');
+console.log(`child sessions captured: ${children.length}`);
+for (const child of children) {
+  console.log(`  - ${child.sessionId} origin=${child.origin} events=${child.eventCount} tools=${child.toolNames.join(',') || '<none>'} structured_output=${child.structuredOutputCalls.length}`);
+  for (const call of child.structuredOutputCalls) {
+    console.log(`    structured_output args: ${String(call.arguments).replaceAll('\n', ' ').slice(0, 300)}`);
+    console.log(`    structured_output result: ${String(call.result).replaceAll('\n', ' ').slice(0, 300)}`);
+  }
+}
+CHILDNODE
+set_env SLIMMER_CHILD_SESSIONS_DIR "$CHILD_SESSIONS_DIR"
+log "child sessions: $CHILD_SESSIONS_DIR ($(find "$CHILD_SESSIONS_DIR" -mindepth 1 -maxdepth 1 -type d | wc -l) session dir(s))"
+
 # Register the workspace + session in the Web GUI's workspace store so the
 # screenshot step can open the session (the UI has no deep link).
 node --input-type=module - "$DSH_HOME" "$DSH_WORKSPACE_ROOT" "$SESSION_ID" "$CI_ARTIFACTS_DIR" <<'NODE'
