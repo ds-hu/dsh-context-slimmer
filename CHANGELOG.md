@@ -48,7 +48,7 @@ All notable changes to the `@ds-hu/dsh-context-slimmer` bundle. Packages are ver
 | :-- | :-- | --: | :-- | --: |
 | baseline（插件 disabled） | 5/5 | 89,153 字符 | 0/0 | 0 |
 | conservative（默认） | 5/5 | 59,142 字符（-33.7%） | 2/0 | 0 |
-| aggressive（仅报告） | 5/5 | 36,536 字符（-59.0%） | 0/2 | 0 |
+| aggressive（仅报告） | 5/5 | 36,845 字符（-58.7%） | 0/2 | 0 |
 
 详见 [`docs/benchmark.md`](docs/benchmark.md)。
 
