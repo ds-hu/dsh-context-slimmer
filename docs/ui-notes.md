@@ -154,10 +154,11 @@ Lead 曾决定把摘要挂到替换事件的官方 `data.meta.contextSlimmer`，
 
 - 注册：`ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({ name: 'conversation.chat.node', key: NODE_KIND, locale: 'context-slimmer' }, SlimRowView))`。
 - 组件（`React.memo`）只依赖 baseline `react`，`h = React.createElement`，无 JSX/build。
-- 收起态：与原生“上下文已压缩”行同构的**单行**——
-  - 16px 前置图标位（at rest 是“上下文压缩”三横线 glyph；hover/focus/展开时切换为展开/收起 chevron，仿原生 disclosure 交互）；
+- 收起态：与原生“上下文已压缩”行同构的**单行**（对照 `dsh-client-ui-chat/lib/client.js:5102-5160` 的 `CompactionItem` + `MessageItem.module.css` 的 `compaction*` 规则）——
+  - 16px 前置图标位（at rest 是“上下文压缩”glyph；hover/focus/展开时切换为展开/收起 chevron，仿原生 disclosure 交互）。**图标为内联 SVG 近似**：原生用 `@deepseek-ai/dsh-client-ui-primitives` 的图标字体（`IconApiOutlineRegular`/`IconChevronRightOutlineRegular`/`IconChevronDownOutlineRegular`）；本 bundle 为免除 `dsh.client.external` 不依赖 primitives，用等效几何 SVG 近似，尺寸/位置/换位逻辑与原生一致；若必须逐像素一致，可在 manifest 加 `external:['@deepseek-ai/dsh-client-ui-primitives']` 并 require 该包（当前不需要）；
   - 标题 `已精简工具调用结果`；2px 圆点分隔；摘要 `{N} 项 · 释放 {X} 字符`（千分位手写分组，zh/en 一致）；`white-space: nowrap; text-overflow: ellipsis` 单行省略。
   - 整行是原生 `<button type="button">`，天然支持 `Enter`/`Space`，折叠语义用 `aria-expanded` 暴露；无可展开内容时 `disabled`。
+  - 展开时头部 `position: sticky; top: 0; z-index: 7` 且背景 `--dsw-alias-bg-base`（与原生一致，长明细滚动时标题钉住；hover 用 `--dsw-alias-interactive-bg-hover-solid`）。
 - 展开态（detail body，缩进 22px 对齐原生）：
   - 每条 item 一行：`#index toolName · op · charsBefore→charsAfter · reason`（`op` 原样显示 `drop`/`trim`，缺失 reason/字符数时有兜底文案），`data-op` 供 e2e/样式区分；
   - `渲染上限 40 条`（`DETAIL_ITEM_LIMIT`），超出显示 `…还有 N 项`；
@@ -189,7 +190,7 @@ Lead 曾决定把摘要挂到替换事件的官方 `data.meta.contextSlimmer`，
 
 - 单条 `<style data-plugin="@ds-hu/dsh-context-slimmer-tool-result" data-plugin-css="…/SlimRow.css">`，在 `ctx.effect` 中挂载、dispose 时移除；即使异常退出，客户端模块卸载清扫也会按 `data-plugin` 兜底移除（`dsh-client-modules/lib/client.js:314`）。
 - 只用主题 token，无硬编码颜色；与原生压缩行一致的 token：
-  `--dsw-alias-label-tertiary`（行主色）、`--dsw-alias-label-secondary`（hover/工具名）、`--dsw-alias-label-caption`（分隔点/弱化字/灰色状态）、`--dsw-alias-interactive-bg-hover`（hover 背景）、`--dsw-radius-sm`、`--dsw-focus-ring-color`（回退 `--dsw-alias-state-business-primary`）、`--dsh-content-font-size-secondary`、`--dsh-content-font-delta`、`--dsh-content-font-delta-secondary`（字体缩放）、`--ds-font-family-code`（等宽数字/工具名）。
+  `--dsw-alias-label-tertiary`（行主色）、`--dsw-alias-label-secondary`（hover/工具名）、`--dsw-alias-label-caption`（分隔点/弱化字/灰色状态）、`--dsw-alias-interactive-bg-hover` / `--dsw-alias-interactive-bg-hover-solid`（hover / 展开态 sticky 头 hover）、`--dsw-alias-bg-base`（sticky 头背景）、`--dsw-radius-sm`、`--dsw-focus-ring-color`（回退 `--dsw-alias-state-business-primary`）、`--dsh-content-font-size-secondary`、`--dsh-content-font-delta`、`--dsh-content-font-delta-secondary`（字体缩放与 `--dsh-compaction-header-height`）、`--ds-font-family-code`（等宽数字/工具名）。
 - 所有选择器都以 `.ctxslim-` 前缀限定，不设置全局规则、不用 `!important`；`hover` 规则包在 `@media (hover:hover)`，动效包在 `prefers-reduced-motion` 守卫内。
 - 行高 24px + 字距对齐原生 compaction 行（`dsh-client-ui-chat` 内 `CompactionItem` 的样式实现，`lib/client.js:5102-5160` 附近）。
 

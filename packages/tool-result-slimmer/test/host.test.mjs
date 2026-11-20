@@ -267,7 +267,7 @@ test('prune-extension rejection degrades for the rest of the instance', async ()
   assert.equal(prunes[1].data.contextSlimmer, undefined)
 })
 
-test('pre-execute guard denies every child tool except structured_output', () => {
+test('pre-execute guard denies every child tool except structured_output', async () => {
   const ctx = createFakeCtx()
   const session = createFakeSession()
   const host = new SlimmerHost(ctx, config)
@@ -276,15 +276,11 @@ test('pre-execute guard denies every child tool except structured_output', () =>
   const guards = ctx.handlers.get('tools/pre-execute')
   assert.equal(guards.length, 1)
   assert.deepEqual(
-    guards[0]({ name: 'bash', agent: { id: 'child-1' } }, async () => ({ kind: 'allow' })),
+    await guards[0]({ name: 'bash', agent: { id: 'child-1' } }, async () => ({ kind: 'allow' })),
     { kind: 'deny', reason: 'context-slimmer child may only submit its structured plan' },
   )
-  return guards[0]({ name: 'structured_output', agent: { id: 'child-1' } }, async () => ({ kind: 'allow' })).then((decision) => {
-    assert.deepEqual(decision, { kind: 'allow' })
-    return guards[0]({ name: 'bash', agent: { id: 'root-agent' } }, async () => ({ kind: 'allow' })).then((rootDecision) => {
-      assert.deepEqual(rootDecision, { kind: 'allow' })
-    })
-  })
+  assert.deepEqual(await guards[0]({ name: 'structured_output', agent: { id: 'child-1' } }, async () => ({ kind: 'allow' })), { kind: 'allow' })
+  assert.deepEqual(await guards[0]({ name: 'bash', agent: { id: 'root-agent' } }, async () => ({ kind: 'allow' })), { kind: 'allow' })
 })
 
 test('estimateMessageTokens uses the token meter, then the 4-chars fallback', () => {

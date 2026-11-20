@@ -330,7 +330,7 @@ export class SlimmerHost {
     if (this.disposed) return next()
     const isChild = exec?.agent?.id !== undefined && this.runs.has(exec.agent.id)
     if (isChild && exec.name !== STRUCTURED_OUTPUT_TOOL) {
-      return { kind: 'deny', reason: 'context-slimmer child may only submit its structured plan' }
+      return Promise.resolve({ kind: 'deny', reason: 'context-slimmer child may only submit its structured plan' })
     }
     return next()
   }

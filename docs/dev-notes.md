@@ -82,3 +82,17 @@
 **决策**：除 `@deepseek-ai/schemastery`（仅 core 的 Config schema 使用，npm 有同版本 3.19.0，跨副本 schema 对象可用于 Loader 校验/表单投影）外，所有包**不 import 任何 `@deepseek-ai/*` 包**。替换事件用纯 JSON 构造（`Session.append` 会校验并冻结）；事件读取走 `session.surface` / `session.eventAt` / `session.deriveEventMessage`。
 
 **理由**：外部插件（profile 安装）不能依赖 DSH 安装目录的模块解析；`/root/.dsh/profiles/node_modules` 的软链是非可移植的本机配置。CI 里 npm workspaces 从 registry 安装 schemastery 即可。
+
+---
+
+## DEV-9 子 Agent 提示词与结构化输出（R5 收口）
+
+**决策**：后台精简器使用 managed fork activation + 原生 `outputSchema`，提示词里的提交通道改为 manager 在子 Agent 创建窗口内原生挂载的 `structured_output` 工具：
+
+- `packages/core/lib/prompt.js` 的 `SLIM_SYSTEM_PROMPT_ZH` / `SLIM_SYSTEM_PROMPT_EN` 中原两处 `slim_tool_results` 改为 `structured_output`（`调用一次 structured_output 提交计划` / `只调用一次 structured_output`）。两个标识符都是 17 字符，因此 prompt-final §5 的 `ZH.length === 1199`、`EN.length === 2819`、英文 words 419 等长度断言**不变**（快照测试仍全绿）；`SLIM_TOOL_DESCRIPTION`（112 words）保留为“计划含义”的描述段，但不再注册任何自定义模型工具。
+- 计划读取顺序：`activation.result.structured` 优先（provider 已按 outputSchema 校验）；缺失时从 `result.output`（`ContentBlock[]`）的文本里提取 ```json 代码块或首个平衡 JSON 对象；仍失败 → 本批 no-op。宿主再用 `validatePlan` 做权威校验（schema 只做提示）。
+- `packages/core/lib/plan.js` 新增 `buildPlanJsonSchema()`，只使用 enforced subset 允许的关键字（type / properties / required / additionalProperties / items / enum / description），**不含** `maxItems`、`minimum`、`maxLength` 等被 `assertObjectJsonSchema` 拒绝的关键字；长度/越界边界全部由 `validatePlan`（`MAX_PLAN_ITEMS`、`MAX_TRIM_TOKENS=300`、50% 原文）在宿主侧强制。已用安装版 `@deepseek-ai/dsh-tools` 的 `assertObjectJsonSchema` 离线验证本 schema 通过。
+- 不允许直接 `import @deepseek-ai/dsh-tools`（外部插件依赖边界，见 DEV-8），因此不调用 `defineTool`；`structured_output` 由 manager 在子 scope 内注册，不在我们 `ctx.tools.definitions()` 的全局 deny 名单里，天然保留；root 级 `tools/pre-execute` 兜底守卫只放行 `structured_output`，其余一律 deny。
+- 风险：fork provider 必须声明 `capabilities.outputSchema` 与 `agentOptions`（安装版 `dsh-subagent-fork-in-process` 两者均为 true；`agentOptions` 用于 `model`/`maxTokens` 覆盖）。若未来 provider 不支持，`startActivation` 抛错 → 本批 `failed`、主循环无感。
+
+**文档同步**：`docs/research/prompt-final.md` 由 paper-researcher 升 v1.2 记录本次工具名迁移（Lead 已安排），实现以本仓 `prompt.js` 常量为准。

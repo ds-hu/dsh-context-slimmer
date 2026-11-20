@@ -190,11 +190,11 @@ window.__ModuleLoader__.load({
     });
 
     /**
-     * Normalize one `meta.contextSlimmer` batch-summary payload into the stable
-     * shape the row renders. Every field is optional at runtime: payloads
-     * written by an older or newer Host build must degrade to a readable row
-     * instead of throwing.
-     * @param raw - untrusted payload (`event.data.meta.contextSlimmer`).
+     * Normalize one `contextSlimmer` batch-summary payload into the stable shape
+     * the row renders. Every field is optional at runtime: payloads written by an
+     * older or newer Host build must degrade to a readable row instead of throwing.
+     * @param raw - untrusted payload (`compaction/prune.data.contextSlimmer`; the
+     *   forward-compat `tool/result.data.meta.contextSlimmer` shares this shape).
      * @returns normalized batch snapshot.
      */
     function normalizeSummary(raw) {
@@ -272,8 +272,6 @@ window.__ModuleLoader__.load({
       'row.saved': '释放 {chars} 字符',
       'row.noop': '本次无改动',
       'row.skipped': '已跳过（模型未返回有效计划）',
-      'row.expand': '展开明细',
-      'row.collapse': '收起明细',
       'row.empty': '无明细',
       'row.more': '…还有 {count} 项',
       'row.model': '模型：{model}',
@@ -292,8 +290,6 @@ window.__ModuleLoader__.load({
       'row.saved': '{chars} chars freed',
       'row.noop': 'No changes this run',
       'row.skipped': 'Skipped (the model returned no valid plan)',
-      'row.expand': 'Show details',
-      'row.collapse': 'Hide details',
       'row.empty': 'No details',
       'row.more': '…and {count} more',
       'row.model': 'Model: {model}',
@@ -775,18 +771,22 @@ window.__ModuleLoader__.load({
     // #region stylesheet
 
     /**
-     * Row stylesheet, matching the native "context compacted" marker row:
-     * 24px tertiary header line, 13px secondary typography, 2px dot separators,
-     * a 22px-indented detail body, and theme tokens only (no fixed palette), so
-     * light/dark themes and content-font scaling apply automatically.
+     * Row stylesheet, matching the native "context compacted" marker row
+     * (`CompactionItem` in `dsh-client-ui-chat/lib/client.js:5102-5160`): 24px
+     * tertiary header line, 13px secondary typography, 2px dot separators, a
+     * 22px-indented detail body, and the same sticky expanded header. Theme tokens
+     * only (no fixed palette), so light/dark themes and content-font scaling apply
+     * automatically.
      */
     const CSS_TEXT = [
-      '.ctxslim-row{box-sizing:border-box;width:100%;min-width:0;padding:2px 0}',
-      '.ctxslim-button{box-sizing:border-box;width:100%;height:calc(24px + var(--dsh-content-font-delta,0px));min-width:0;border-radius:var(--dsw-radius-sm);color:var(--dsw-alias-label-tertiary);font:inherit;text-align:left;background:0 0;border:none;align-items:center;padding:0;transition:color .1s;display:flex}',
+      '.ctxslim-row{--dsh-compaction-header-height:calc(24px + var(--dsh-content-font-delta,0px));box-sizing:border-box;width:100%;min-width:0;padding:2px 0}',
+      '.ctxslim-button{box-sizing:border-box;width:100%;height:var(--dsh-compaction-header-height);min-width:0;border-radius:var(--dsw-radius-sm);color:var(--dsw-alias-label-tertiary);font:inherit;text-align:left;background:0 0;border:none;align-items:center;padding:0;transition:color .1s;display:flex}',
+      '.ctxslim-row:has(.ctxslim-body) .ctxslim-button{z-index:7;background:var(--dsw-alias-bg-base);border-radius:0;position:sticky;top:0}',
       '.ctxslim-button:not(:disabled){cursor:pointer}',
       '.ctxslim-button:disabled{cursor:default}',
       '.ctxslim-button:focus-visible{outline:1.5px solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:2px}',
       '@media (hover:hover){.ctxslim-button:not(:disabled):hover{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-interactive-bg-hover)}}',
+      '@media (hover:hover){.ctxslim-row:has(.ctxslim-body) .ctxslim-button:hover{background:var(--dsw-alias-interactive-bg-hover-solid)}}',
       '.ctxslim-leading{width:calc(16px + var(--dsh-content-font-delta,0px));height:calc(16px + var(--dsh-content-font-delta,0px));color:inherit;flex:none;place-items:center;margin-right:6px;display:inline-grid}',
       '.ctxslim-leading svg{width:calc(14px + var(--dsh-content-font-delta,0px));height:calc(14px + var(--dsh-content-font-delta,0px))}',
       '.ctxslim-context,.ctxslim-disclosure{grid-area:1/1;justify-content:center;align-items:center;display:inline-flex}',
@@ -799,7 +799,7 @@ window.__ModuleLoader__.load({
       '.ctxslim-sep{background:var(--dsw-alias-label-caption);border-radius:1px;flex:none;width:2px;height:2px;margin:0 8px}',
       '.ctxslim-summary{min-width:0;color:inherit;font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(24px + var(--dsh-content-font-delta,0px));text-overflow:ellipsis;white-space:nowrap;flex:auto;overflow:hidden}',
       '.ctxslim-row[data-status="no-op"] .ctxslim-button,.ctxslim-row[data-status="rejected"] .ctxslim-button,.ctxslim-row[data-status="failed"] .ctxslim-button{color:var(--dsw-alias-label-caption,var(--dsw-alias-label-tertiary))}',
-      '.ctxslim-body{padding:4px 0 4px calc(22px + var(--dsh-content-font-delta,0px));color:var(--dsw-alias-label-tertiary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:calc(22px + var(--dsh-content-font-delta-secondary,0px))}',
+      '.ctxslim-body{padding:4px 0 4px calc(22px + var(--dsh-content-font-delta,0px));color:var(--dsw-alias-label-tertiary);font-size:var(--dsh-content-font-size-secondary,13px);line-height:var(--dsh-compaction-header-height)}',
       '.ctxslim-items{flex-direction:column;gap:2px;min-width:0;display:flex}',
       '.ctxslim-item{display:flex;flex-wrap:wrap;align-items:baseline;min-width:0;gap:0 6px;overflow-wrap:anywhere}',
       '.ctxslim-item-sep{color:var(--dsw-alias-label-caption);flex:none}',

@@ -180,7 +180,6 @@ jobs:
       DSH_TEST_PROFILE_WEB: ci-web
       DSH_TEST_MODEL: ${{ inputs.model || '' }}
       DSH_VERSION_INPUT: ${{ inputs.dsh_version || '' }}
-      SLIMMER_CONFIG_JSON: ${{ inputs.slimmer_config || '{"enabled":true,"everyNToolCalls":2,"minChars":0,"protectRecent":1,"maxTargets":6,"minTargetChars":0,"timeoutMs":180000,"forkProvider":"fork","promptLocale":"zh","model":{"provider":"inherit"}}' }}
       SLIMMER_UI_TEXT: 已精简工具调用结果
       SLIMMER_PLUGIN_NAME: Context Slimmer,上下文精简器
       INCLUDE_WEB_SEARCH: ${{ github.event_name == 'workflow_dispatch' && inputs.include_web_search == false && '0' || '1' }}
@@ -243,8 +242,16 @@ jobs:
       - name: Prepare temporary profile (model route + isolation + plugin config)
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          # Forwarded as a plain string reference: a JSON object literal inside an
+          # expression contains `}}`, which collides with the expression delimiter.
+          SLIMMER_CONFIG_JSON_INPUT: ${{ inputs.slimmer_config }}
         run: |
           set -euo pipefail
+          config="${SLIMMER_CONFIG_JSON_INPUT:-}"
+          if [ -z "$config" ]; then
+            config="$(cat scripts/ci/slimmer-config.default.json)"
+          fi
+          export SLIMMER_CONFIG_JSON="$config"
           bash scripts/ci/prepare-profile.sh --profile ci-headless --template headless --probe-model
 
       - name: Prepare web profile for screenshots
@@ -276,7 +283,10 @@ jobs:
           set -euo pipefail
           set -a; . "$CI_ENV_FILE"; set +a
           mkdir -p "$CI_ARTIFACTS_DIR"
-          dsh --profile "${DSH_TEST_PROFILE_WEB:-ci-web}" web --no-open --host 127.0.0.1 --port 0 > "$CI_ARTIFACTS_DIR/web.log" 2>&1 &
+          # Launcher flags first; the first token the launcher does not own starts
+          # the web app's own args. This starts OUR composed profile (ci-web).
+          nohup dsh --profile "${DSH_TEST_PROFILE_WEB:-ci-web}" --no-open --host 127.0.0.1 --port 0 \
+            > "$CI_ARTIFACTS_DIR/web.log" 2>&1 &
           echo "$!" > "$CI_ARTIFACTS_DIR/web.pid"
           for _ in $(seq 1 120); do
             if grep -q "dsh web: http" "$CI_ARTIFACTS_DIR/web.log" 2>/dev/null; then break; fi

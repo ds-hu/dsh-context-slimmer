@@ -155,16 +155,20 @@ is rebuilt.
 - Collapsed: one line, native-compaction typography — leading icon (context glyph
   that swaps to a disclosure chevron on hover/focus/expand), title, 2px dot
   separator, `N 项 · 释放 X 字符`. The whole line is a native `<button>` with
-  `aria-expanded`; keyboard activation is the browser default.
+  `aria-expanded`; keyboard activation is the browser default. The icon is an
+  inline-SVG approximation of the primitives glyph (`IconApiOutlineRegular` /
+  chevrons) to avoid declaring `dsh.client.external`; geometry matches the native
+  16px seat. An expanded long body keeps the native sticky header behavior.
 - Expanded body: one line per item (`#index toolName · op · charsBefore→charsAfter
   · reason`, max 40 rendered, then `…还有 N 项`), then trigger statistics and
   `模型：{provider}/{model}` last. `op` is printed verbatim (`drop`/`trim`).
 - Non-`applied` statuses render gray (`本次无改动` / `已跳过…`) for forward
   compatibility; today the Host only emits summaries for applied batches.
 - Tokens only (`--dsw-alias-label-tertiary`, `--dsw-alias-label-caption`,
-  `--dsw-alias-interactive-bg-hover`, `--dsw-radius-sm`,
-  `--dsw-focus-ring-color`, `--dsh-content-font-*`), so light/dark themes and the
-  content-font scale apply automatically. All classes are prefixed `ctxslim-`.
+  `--dsw-alias-interactive-bg-hover(-solid)`, `--dsw-alias-bg-base`,
+  `--dsw-radius-sm`, `--dsw-focus-ring-color`, `--dsh-content-font-*`), so
+  light/dark themes and the content-font scale apply automatically. All classes
+  are prefixed `ctxslim-`.
 - e2e hooks: `data-ctxslimmer-row`, `data-ctxslimmer-toggle`,
   `data-ctxslimmer-summary`, `data-ctxslimmer-item`, `data-ctxslimmer-model`,
   `data-ctxslimmer-trigger`, `data-ctxslimmer-status`, `data-status`,

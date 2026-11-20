@@ -55,7 +55,7 @@
     "test": "node --test packages/core/test/*.test.mjs packages/tool-result-slimmer/test/*.test.mjs",
     "test:core": "node --test packages/core/test/*.test.mjs",
     "test:module": "node --test packages/tool-result-slimmer/test/*.test.mjs",
-    "test:pack": "npm --prefix packages/core pack --dry-run --json && npm --prefix packages/tool-result-slimmer pack --dry-run --json",
+    "test:pack": "npm pack --dry-run --json --workspace packages/core && npm pack --dry-run --json --workspace packages/tool-result-slimmer",
     "check": "npm run test"
   }
 }
