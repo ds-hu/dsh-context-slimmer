@@ -272,7 +272,7 @@ jobs:
           set -a; . "$CI_ENV_FILE"; set +a
           node scripts/ci/assert-slimming.mjs \
             --session-log "$VERIFY_SESSION_JSONL" \
-            --json-stream "$SCENARIO_JSON" \
+            --json-stream "${SCENARIO_JSON:-$CI_ARTIFACTS_DIR/scenario.jsonl}" \
             --min-replacements 1 \
             --min-savings-chars 256 \
             --min-reduction-ratio 0.2
