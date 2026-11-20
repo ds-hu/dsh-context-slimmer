@@ -204,8 +204,10 @@ if (( SCENARIO_EXIT_CODE != 0 )); then
 fi
 log "headless session completed (exit 0)"
 
-# Parse the NDJSON event stream: identity, tool usage, final answer.
-node --input-type=module - "$SCENARIO_JSON" "$SCENARIO_SUMMARY" <<'NODE'
+# Parse the NDJSON event stream: identity, tool usage, final answer. The node
+# program prints a COMPACT JSON line on stdout (captured below) and writes a
+# pretty-printed copy for humans/artifacts.
+SUMMARY_JSON="$(node --input-type=module - "$SCENARIO_JSON" "$SCENARIO_SUMMARY" <<'NODE'
 import fs from 'node:fs';
 const [jsonPath, summaryPath] = process.argv.slice(2);
 const lines = fs.readFileSync(jsonPath, 'utf8').split('\n').filter((line) => line.trim() !== '');
@@ -224,18 +226,18 @@ const summary = {
   cwd: session.cwd ?? null,
   eventCount: events.length,
   toolCalls: calls.length,
-  toolNames: [...new Set(calls.map((event) => event.name).filter(Boolean))],
+  toolNames: [...new Set(calls.map((event) => event.name ?? event.toolName ?? event?.data?.name).filter(Boolean))],
   toolResults: results.length,
   finalPresent: final !== undefined,
   finalText: final?.text ?? null,
   finalReason: final?.reason ?? null,
 };
 fs.writeFileSync(summaryPath, JSON.stringify(summary, undefined, 2) + '\n');
-process.stdout.write(JSON.stringify(summary) + '\n');
+process.stdout.write(JSON.stringify(summary));
 NODE
-
-SUMMARY_JSON="$(tail -1 "$SCENARIO_SUMMARY")"
-SESSION_ID="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).sessionId)' "$SUMMARY_JSON")"
+)"
+log "scenario summary: $SUMMARY_JSON"
+SESSION_ID="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).sessionId)' "$SUMMARY_JSON")" 
 [[ -n "$SESSION_ID" ]] || die "could not read the session id from $SCENARIO_SUMMARY"
 TOOL_CALLS="$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).toolCalls))' "$SUMMARY_JSON")"
 log "session: $SESSION_ID (tool calls: $TOOL_CALLS)"

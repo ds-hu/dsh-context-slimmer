@@ -19,7 +19,7 @@ import { CHARS_PER_TOKEN } from '../lib/plan.js'
 
 // Snapshot assertions from docs/research/prompt-final.md §5 (v1.1 baseline,
 // with the Lead-approved R5 rename of the submission tool to the native
-// structured_output tool — see docs/dev-notes.md DEV-6).
+// structured_output tool — see docs/dev-notes.md DEV-9).
 test('Chinese system prompt keeps the pinned length and token budget', () => {
   assert.equal(SLIM_SYSTEM_PROMPT_ZH.length, 1199)
   assert.equal(Math.ceil(SLIM_SYSTEM_PROMPT_ZH.length / CHARS_PER_TOKEN), 300)
@@ -65,10 +65,16 @@ test('classification waterfall order is preserved', () => {
   }
 })
 
-test('forbidden legacy vocabulary is absent', () => {
+test('forbidden legacy vocabulary is absent from both prompts', () => {
   for (const forbidden of ['keep', 'class', 'confidence', 'TRIM', 'REPLACE', '\uFFFD']) {
     assert.equal(SLIM_SYSTEM_PROMPT_ZH.includes(forbidden), false, `forbidden token ${forbidden}`)
   }
+  // R5/DEV-9: the hosted custom tool name is retired everywhere; the plan is
+  // submitted through the manager-provided native structured_output tool.
+  for (const prompt of [SLIM_SYSTEM_PROMPT_ZH, SLIM_SYSTEM_PROMPT_EN, DATA_BOUNDARY]) {
+    assert.equal(prompt.includes('slim_tool_results'), false, 'system prompt must not mention the retired slim_tool_results tool')
+  }
+  assert.equal(DATA_BOUNDARY.includes('structured_output'), true)
 })
 
 test('tool description and parameter descriptions stay verbatim', () => {

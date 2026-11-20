@@ -94,8 +94,9 @@ check it runs is offline.
 | `screenshot` | `true` | Starts `dsh web` and captures screenshots |
 | `run_e2e` | `true` | Rehearsal switch: run only the static job |
 
-CI plugin config (current schema defaults overridden so a 3-tool-call scenario
-triggers exactly one batch):
+CI plugin config comes from `scripts/ci/slimmer-config.default.json` (the
+`workflow_dispatch` input `slimmer_config` overrides it when set). Current schema
+defaults overridden so a 3-tool-call scenario triggers exactly one batch:
 
 ```json
 {
@@ -372,7 +373,49 @@ Additionally verified against real local dsh `0.2.2-rc.1` without any API call:
 
 ---
 
-## 10. Troubleshooting
+## 10. Bring-up pitfalls (found and fixed while bringing CI up)
+
+These are worth remembering because they are bash/GitHub-Actions/Node traps, not
+plugin bugs:
+
+1. **Bash `${VAR:-{...JSON...}}` corrupts the value.** If the default word of a
+   parameter expansion contains `}`, bash appends the trailing braces *even when
+   the variable is set*: `SLIMMER_CONFIG_JSON="${SLIMMER_CONFIG_JSON:-{...}}"` +
+   an exported, perfectly valid config produced a value with `}}}` at the end and
+   `JSON.parse` failed with `position 237`. Fix in `prepare-profile.sh`:
+   `SLIMMER_CONFIG_JSON="${SLIMMER_CONFIG_JSON-}"` plus an explicit
+   `if [[ -z ... ]]` assignment. The script additionally trims stray bytes after
+   the final `}` and logs a `WARNING: ... stray byte(s)` line, so a future
+   environment quirk shows up in the log instead of failing silently.
+2. **`}}` inside a GitHub Actions expression literal.** A dispatch-input default
+   like `${{ inputs.slimmer_config || '{"enabled":true,"model":{"provider":"inherit"}}' }}`
+   contains `}}`, which closes the expression early (the workflow log showed the
+   JSON truncated/mangled and the paid e2e job failing before the model call).
+   Fix: the default JSON now lives in `scripts/ci/slimmer-config.default.json`;
+   the dispatch input is forwarded as a plain string reference
+   (`SLIMMER_CONFIG_JSON_INPUT: ${{ inputs.slimmer_config }}`) and the step reads
+   the file when it is empty.
+3. **`runner` context is not available in a job-level `env:` block.** The e2e job
+   uses literal `/tmp/...` paths (artifacts/home/env file) instead of
+   `${{ runner.temp }}`; steps export them via `$GITHUB_ENV` when a per-step path
+   is needed.
+4. **ESM `import()` ignores `NODE_PATH`.** The workflow installs Playwright
+   globally, so `screenshot.mjs` falls back to `createRequire(npm root -g)`
+   before giving up; otherwise screenshots would be skipped on every run.
+5. **Multi-frame zstd session logs.** Node's `zlib` zstd decoder only returns the
+   first frame; `assert-slimming.mjs` shells out to the `zstd` CLI (the CI profile
+   also sets `compression: none`, producing plain JSONL directly).
+6. **Replacement chains.** A replacement may cite an earlier replacement of the
+   same node (a second slimming round), not only the append-origin event; the
+   assertion resolves `sourceEventSeqs` back to the append origin before checking
+   the transcript. Built-in compaction summaries cite log-only events
+   (`compaction/start`, `compaction/summary`), which is why plugin replacements
+   are scoped to `tool/result` surface events.
+7. **Headless sessions are not auto-registered in the Web GUI.** `run-scenario.sh`
+   seeds `$DSH_HOME/storages/workspace.json` with the workspace path + session id
+   so `screenshot.mjs` can click the sidebar row (there is no deep link).
+
+## 11. Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |
