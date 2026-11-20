@@ -354,30 +354,44 @@ Additionally verified against real local dsh `0.2.2-rc.1` without any API call:
   locale string) against an isolated local GUI;
 * `GET /models` probe code paths via `--dry-run` and a local stub.
 
-**待验证（首次真实 CI 运行后才能确认）**
+**Final verification run — 2026-11-20, run
+[44713620169](https://github.com/ds-hu/dsh-context-slimmer/actions/runs/44713620169)
+(commit `b52460f`, all jobs green).** The first full green run resolved the
+bring-up checklist:
 
-1. `@deepseek-ai/dsh@0.2.2-rc.1` install and profile boot **on the GitHub
-   runner with Node 24** (local integration run used Node 22; composition and
-   `--help` boot passed, so only the runner environment differs).
-2. `forkProvider: "fork"` mounting the managed-fork background agent inside the
-   headless profile; the child session's native `structured_output` tool call is
-   expected there, not in the parent log.
-3. The real plugin event names/shape (`compaction/prune` +
-   `data.contextSlimmer.role=summary`, `status: "applied"`) and whether the
-   additive field is accepted by this exact dsh build (degradation path exists).
-4. The exact plugin row id discovered from `--dump-config` (currently
-   `context-slimmer-tool-result`; not hard-coded anywhere).
-5. Whether the `/models` response lists `deepseek-flash`; otherwise the script
-   falls back to the first listed id and prints it (free probe).
-6. Headless session visibility in the Web GUI sidebar on the runner
-   (locally verified via a seeded `workspace.json`).
-7. Actual token spend of one run versus the ¥1 estimate (no local real calls
-   were made).
-8. `node --test` globs once `packages/core/test/` exists (currently empty; the
-   static job treats this as a warning during bring-up).
-9. `dsh plugin --profile ... add <path>` alternative install method
-   (`--install-method=dsh-plugin`) is implemented but untested until pnpm is on
-   the runner (the workflow default is the symlink method).
+1. dsh `0.2.2-rc.1` installs and boots on the runner with Node 24 — `Pin and
+   install dsh`, both profile preparations and the web server all succeeded.
+2. `forkProvider: "fork"` mounts the managed-fork child; the child session
+   (captured under `child-sessions/`) contains exactly one `structured_output`
+   tool call with the JSON plan, and the parent log contains only
+   `subagent/catalog`.
+3. The protocol shape is accepted by this build: 1 × `compaction/prune` with
+   `data.contextSlimmer` (`role=summary`, `status=applied`) + 1 × `tool/result`
+   replacement (`seq 36 ← 17`); `metaLanded=true` (no degradation).
+4. Row id discovered dynamically = `context-slimmer-tool-result`; nothing is
+   hard-coded.
+5. `/models` listed `deepseek-flash` (ctx 1,048,576) and
+   `deepseek-v4-pro`; the scenario used `deepseek-flash` with
+   `reasoningEffort=off`, `maxTokens=2048`.
+6. Session visible in the Web GUI sidebar after seeding `workspace.json`;
+   `screenshot-report.json` reports `session.status=opened-exact`,
+   `ui_assert_status=found` and `pluginsPanel.status=found`.
+7. Cost of the run: **52.1K tokens total** (97% cache hits), far below the ¥1
+   estimate; the e2e job itself took ~3.5 min.
+8. Offline tests run and pass in the static job (`npm run test:core`,
+   `test:module`, `test:pack`).
+9. Not yet exercised: `--install-method=dsh-plugin` (still untested) and the
+   `publish.yml` real publish path (needs `NPM_TOKEN` and a `v*` tag; only
+   dry-run/self-checks are covered so far).
+
+**Observed UI detail (not a CI blocker).** In the replayed historical session
+the Web UI paints tool activity collapsed: the plugin row exists in the DOM
+(`.ctxslim-row`, text `已精简工具调用结果…`) and the assertion reports
+`ui_assert_status=found`, but the chat view does not visibly paint the row.
+`verify-trajectory.png` therefore records the visible result
+(`read … → [elided by context-slimmer] …`), alongside `verify-chat-zh.png`
+(the real session, no longer the blank new-session view), `verify-chat-detail.png`
+and `verify-plugins.png` (bundle/plugin row in the native Plugins panel).
 
 ---
 
