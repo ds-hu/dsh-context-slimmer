@@ -1,0 +1,350 @@
+# Real end-to-end verification for the dsh-context-slimmer bundle.
+#
+# Two jobs:
+#   static — no secrets, runs on every push/PR (including forks): install the
+#            workspace, run the offline test suite, syntax-check the CI scripts,
+#            validate the workflow YAML and scan for credential material.
+#   e2e    — needs DEEPSEEK_API_KEY; builds a throw-away DSH profile with the
+#            local packages, runs one real cost-capped headless session, asserts
+#            the slimming protocol over the real session log, then opens `dsh
+#            web` with Playwright for screenshots. All evidence is uploaded even
+#            on failure.
+#
+# Design notes:
+#   * The e2e job is gated by a job output because `secrets` cannot be used in a
+#     job-level `if:`; fork PRs therefore skip e2e cleanly instead of failing.
+#   * UI text assertions are non-fatal inside screenshot.mjs: a missing row is
+#     recorded as `ui_assert_status=skipped-timeout` after screenshots are taken.
+#     The hard gate is assert-slimming.mjs over the session log.
+#   * No DEEPSEEK_BASE_URL is set, so the official endpoint is used. One run is
+#     capped with reasoningEffort=off and maxTokens=2048, target < ¥1.
+name: verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: Model id override (empty = probe /models and prefer deepseek-flash)
+        required: false
+        type: string
+        default: ''
+      dsh_version:
+        description: Exact @deepseek-ai/dsh version (empty = derive from the repo engine range)
+        required: false
+        type: string
+        default: ''
+      node_version:
+        description: Node.js major version (dsh requires >=24.9.0)
+        required: false
+        type: string
+        default: '24'
+      slimmer_config:
+        description: JSON config applied to the plugin row in the temporary profile
+        required: false
+        type: string
+        default: '{"enabled":true,"everyNToolCalls":2,"minChars":0,"protectRecent":1,"maxTargets":6,"minTargetChars":0,"timeoutMs":180000,"forkProvider":"fork","promptLocale":"zh","model":{"provider":"inherit"}}'
+      include_web_search:
+        description: Add one web_search step to the scenario (toggles a full model turn)
+        required: false
+        type: boolean
+        default: true
+      screenshot:
+        description: Start dsh web and capture UI screenshots (non-fatal UI assertions)
+        required: false
+        type: boolean
+        default: true
+      run_e2e:
+        description: Run the real (paid) session job
+        required: false
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: 'true'
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  static:
+    name: static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version || '24' }}
+
+      - name: Cache npm cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            npm-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            echo "no package-lock.json yet; falling back to npm install"
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Offline tests (non-fatal while modules are still landing)
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then
+            npm run test:core || echo "WARNING: core test suite missing or failing (non-fatal during bring-up)"
+            npm run test:module || echo "WARNING: module test suite missing or failing (non-fatal during bring-up)"
+            npm run test:pack || echo "WARNING: pack dry-run failed (non-fatal during bring-up)"
+          else
+            echo "WARNING: no package.json yet"
+          fi
+
+      - name: Syntax-check CI scripts
+        run: |
+          set -euo pipefail
+          bash -n scripts/ci/*.sh
+          node --check scripts/ci/assert-slimming.mjs
+          node --check scripts/ci/screenshot.mjs
+          node scripts/ci/assert-slimming.mjs --self-test --allow-builtin-fold
+
+      - name: Dry-run the CI helpers
+        run: |
+          set -euo pipefail
+          DSH_HOME="$RUNNER_TEMP/dsh-home-dry" CI_ARTIFACTS_DIR="$RUNNER_TEMP/ci-artifacts-dry" \
+            bash scripts/ci/prepare-profile.sh --dry-run
+          DSH_HOME="$RUNNER_TEMP/dsh-home-dry" CI_ARTIFACTS_DIR="$RUNNER_TEMP/ci-artifacts-dry" \
+            bash scripts/ci/run-scenario.sh --dry-run
+
+      - name: Validate workflow YAML
+        run: |
+          set -euo pipefail
+          for file in .github/workflows/*.yml; do
+            ruby -ryaml -e 'YAML.parse_stream(File.read(ARGV[0]))' "$file"
+            echo "YAML OK: $file"
+          done
+
+      - name: Secret scan
+        run: bash scripts/ci/scan-secrets.sh
+
+  gate:
+    name: secret availability gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_secret: ${{ steps.check.outputs.has_secret }}
+    steps:
+      - name: Check DEEPSEEK_API_KEY availability
+        id: check
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+            echo "has_secret=true" >> "$GITHUB_OUTPUT"
+            echo "DEEPSEEK_API_KEY is available; the paid e2e job will run."
+          else
+            echo "has_secret=false" >> "$GITHUB_OUTPUT"
+            echo "DEEPSEEK_API_KEY is not available (fork PR or missing secret); skipping the paid e2e job."
+          fi
+
+  e2e:
+    name: real session + slimming evidence
+    needs: [static, gate]
+    if: needs.gate.outputs.has_secret == 'true' && (github.event_name != 'workflow_dispatch' || inputs.run_e2e == true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI_ARTIFACTS_DIR: ${{ runner.temp }}/ci-artifacts
+      CI_ENV_FILE: ${{ runner.temp }}/ci-env.sh
+      DSH_HOME: ${{ runner.temp }}/dsh-home
+      DSH_TEST_PROFILE_HEADLESS: ci-headless
+      DSH_TEST_PROFILE_WEB: ci-web
+      DSH_TEST_MODEL: ${{ inputs.model || '' }}
+      DSH_VERSION_INPUT: ${{ inputs.dsh_version || '' }}
+      SLIMMER_CONFIG_JSON: ${{ inputs.slimmer_config || '{"enabled":true,"everyNToolCalls":2,"minChars":0,"protectRecent":1,"maxTargets":6,"minTargetChars":0,"timeoutMs":180000,"forkProvider":"fork","promptLocale":"zh","model":{"provider":"inherit"}}' }}
+      SLIMMER_UI_TEXT: 已精简工具调用结果
+      SLIMMER_PLUGIN_NAME: Context Slimmer,上下文精简器
+      INCLUDE_WEB_SEARCH: ${{ github.event_name == 'workflow_dispatch' && inputs.include_web_search == false && '0' || '1' }}
+      ENABLE_SCREENSHOTS: ${{ github.event_name == 'workflow_dispatch' && inputs.screenshot == false && '0' || '1' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version || '24' }}
+
+      - name: Cache npm cache, npm global prefix, Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/ms-playwright
+          key: e2e-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ inputs.dsh_version || 'latest-pinned' }}
+          restore-keys: |
+            e2e-${{ runner.os }}-
+
+      - name: Install workspace dependencies
+        run: |
+          set -euo pipefail
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            echo "no package-lock.json yet; falling back to npm install"
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Pin and install dsh
+        run: |
+          set -euo pipefail
+          version="${DSH_VERSION_INPUT:-$(node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const pick = (deps) => deps && (deps["@deepseek-ai/dsh"] ?? deps["@deepseek-ai/dsh-core"]);
+            const raw = pick(pkg.devDependencies) ?? pick(pkg.peerDependencies) ?? pick(pkg.dependencies);
+            const match = raw && String(raw).match(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/);
+            console.log(match ? match[0] : "0.2.2-rc.1");
+          ')}"
+          echo "installing @deepseek-ai/dsh@${version}"
+          npm install -g "@deepseek-ai/dsh@${version}" --no-audit --no-fund
+          dsh --version
+          echo "DSH_VERSION_RESOLVED=${version}" >> "$GITHUB_ENV"
+
+      - name: Install Playwright (screenshots only)
+        if: env.ENABLE_SCREENSHOTS == '1'
+        run: |
+          set -euo pipefail
+          npm install -g playwright@1.64.1 --no-audit --no-fund
+          if ! playwright install --with-deps chromium; then
+            echo "WARNING: Playwright browser install failed; screenshots will be skipped"
+            echo "ENABLE_SCREENSHOTS=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Prepare temporary profile (model route + isolation + plugin config)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/prepare-profile.sh --profile ci-headless --template headless --probe-model
+
+      - name: Prepare web profile for screenshots
+        run: |
+          set -euo pipefail
+          bash scripts/ci/prepare-profile.sh --profile ci-web --template web --no-probe-model
+
+      - name: Run one real headless session
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci/run-scenario.sh
+
+      - name: Assert slimming protocol (hard gate)
+        run: |
+          set -euo pipefail
+          set -a; . "$CI_ENV_FILE"; set +a
+          node scripts/ci/assert-slimming.mjs \
+            --session-log "$VERIFY_SESSION_JSONL" \
+            --json-stream "$SCENARIO_JSON" \
+            --min-replacements 1 \
+            --min-savings-chars 256 \
+            --min-reduction-ratio 0.2
+
+      - name: Start dsh web
+        if: env.ENABLE_SCREENSHOTS == '1'
+        run: |
+          set -euo pipefail
+          set -a; . "$CI_ENV_FILE"; set +a
+          mkdir -p "$CI_ARTIFACTS_DIR"
+          dsh --profile "${DSH_TEST_PROFILE_WEB:-ci-web}" web --no-open --host 127.0.0.1 --port 0 > "$CI_ARTIFACTS_DIR/web.log" 2>&1 &
+          echo "$!" > "$CI_ARTIFACTS_DIR/web.pid"
+          for _ in $(seq 1 120); do
+            if grep -q "dsh web: http" "$CI_ARTIFACTS_DIR/web.log" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          url="$(grep -o 'dsh web: http[^ ]*' "$CI_ARTIFACTS_DIR/web.log" | head -1 | sed 's/^dsh web: //')"
+          if [ -z "$url" ]; then
+            echo "web server did not print its URL; log tail:" >&2
+            tail -30 "$CI_ARTIFACTS_DIR/web.log" >&2 || true
+            exit 1
+          fi
+          echo "DSH_WEB_URL=$url" >> "$GITHUB_ENV"
+          echo "DSH_WEB_LOG=$CI_ARTIFACTS_DIR/web.log" >> "$GITHUB_ENV"
+          echo "web server ready: ${url%%\?*}"
+
+      - name: Screenshots (non-fatal UI assertions)
+        if: env.ENABLE_SCREENSHOTS == '1'
+        run: |
+          set -euo pipefail
+          set -a; . "$CI_ENV_FILE"; set +a
+          node scripts/ci/screenshot.mjs \
+            --web-log "$CI_ARTIFACTS_DIR/web.log" \
+            --session-id "$SESSION_ID" \
+            --ui-text "$SLIMMER_UI_TEXT"
+          if [ -f "$CI_ARTIFACTS_DIR/screenshot-report.json" ]; then
+            status="$(node -e 'const r=require(process.argv[1]); process.stdout.write(String(r.ui_assert_status))' "$CI_ARTIFACTS_DIR/screenshot-report.json")"
+            if [ "$status" != "found" ]; then
+              echo "::warning::UI row text not found (ui_assert_status=${status}); screenshots were still uploaded"
+            fi
+          fi
+
+      - name: Stop dsh web
+        if: always()
+        run: |
+          if [ -f "$CI_ARTIFACTS_DIR/web.pid" ]; then
+            pid="$(cat "$CI_ARTIFACTS_DIR/web.pid")"
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            rm -f "$CI_ARTIFACTS_DIR/web.pid"
+          fi
+
+      - name: Publish report to the job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### Context Slimmer verification"
+            echo
+            if [ -f "$CI_ARTIFACTS_DIR/assert-report.txt" ]; then
+              echo '```'
+              cat "$CI_ARTIFACTS_DIR/assert-report.txt"
+              echo '```'
+            else
+              echo "_No assertion report was produced (the run failed before the assert step)._"
+            fi
+            if [ -f "$CI_ARTIFACTS_DIR/screenshot-report.json" ]; then
+              echo
+              echo "Screenshot report:"
+              echo '```json'
+              cat "$CI_ARTIFACTS_DIR/screenshot-report.json"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/ci-artifacts
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,23 @@
+# Node
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+.npm/
+
+# Local CI/runtime artifacts (never commit)
+.ci-home/
+.ci-profile/
+.artifacts/
+*.tgz
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Secrets (never commit; provided through environment/secrets only)
+.env
+.env.*
+secrets.json

@@ -1,0 +1,46 @@
+{
+  "name": "@ds-hu/dsh-context-slimmer-core",
+  "version": "0.1.0",
+  "description": "Pure shared library of the dsh-context-slimmer bundle: event protocol, surface-replacement primitive, plan validation, prompt builder, per-session counters and the row configuration schema. No dsh runtime imports at module load beyond schemastery; not a Loader row.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./events": "./lib/events.js",
+    "./plan": "./lib/plan.js",
+    "./replace": "./lib/replace.js",
+    "./counters": "./lib/counters.js",
+    "./config": "./lib/config.js",
+    "./prompt": "./lib/prompt.js",
+    "./templates": "./lib/templates.js",
+    "./freeze": "./lib/freeze.js",
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ds-hu/dsh-context-slimmer.git",
+    "directory": "packages/core"
+  },
+  "license": "MIT",
+  "files": [
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "context-slimmer",
+    "cordis"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.19.0"
+  }
+}

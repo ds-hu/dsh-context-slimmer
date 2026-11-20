@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Context Slimmer",
+    "description": "A background subagent selectively trims stale tool results for the main agent: the model sees only the slimmed results, the chat transcript keeps the original tool cards, and one 'Tool results slimmed' line is appended. Every feature module switches and configures independently."
+  }
+}

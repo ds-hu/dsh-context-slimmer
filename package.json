@@ -1,0 +1,61 @@
+{
+  "name": "@ds-hu/dsh-context-slimmer",
+  "version": "0.1.0",
+  "description": "Model-driven selective trimming of stale tool results in DeepSeek Harness sessions. Ships as independently switchable feature modules; the main agent keeps its normal context, the chat transcript keeps the original cards, and one extra line reports what was slimmed.",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "icon": "./icon.svg",
+  "workspaces": [
+    "packages/*"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ds-hu/dsh-context-slimmer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ds-hu/dsh-context-slimmer/issues"
+  },
+  "homepage": "https://github.com/ds-hu/dsh-context-slimmer#readme",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "cordis",
+    "context-engineering",
+    "context-compression",
+    "tool-result"
+  ],
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@ds-hu/dsh-context-slimmer-core": "0.1.0",
+    "@ds-hu/dsh-context-slimmer-tool-result": "0.1.0"
+  },
+  "license": "MIT",
+  "files": [
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.*.md",
+    "LICENSE",
+    "docs"
+  ],
+  "scripts": {
+    "test": "node --test packages/core/test/*.test.mjs packages/tool-result-slimmer/test/*.test.mjs",
+    "test:core": "node --test packages/core/test/*.test.mjs",
+    "test:module": "node --test packages/tool-result-slimmer/test/*.test.mjs",
+    "test:pack": "npm --prefix packages/core pack --dry-run --json && npm --prefix packages/tool-result-slimmer pack --dry-run --json",
+    "check": "npm run test"
+  }
+}

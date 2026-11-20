@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Tool-result slimmer",
+    "description": "A background fork subagent periodically reviews stale tool results: successful and relevant content stays byte-identical, wholly irrelevant or recoverable results are dropped, redundant parts are trimmed, and failure evidence is kept. The main agent only sees the slimmed results, the chat transcript keeps the original tool cards, and one extra row reports what was slimmed."
+  }
+}

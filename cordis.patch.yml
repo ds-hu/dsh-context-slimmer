@@ -1,0 +1,39 @@
+# The @ds-hu/dsh-context-slimmer bundle patch: one Loader row per feature module.
+#
+# `dsh plugin --profile <name> add @ds-hu/dsh-context-slimmer` maintains
+# `dsh.profile.bundles` automatically (the reconcile step in the dsh CLI appends
+# every dependency declaring `dsh.bundle`), so this file is the only wiring an
+# installation needs. Users never hand-edit their profile's cordis.patch.yml for
+# this bundle.
+#
+# Why one row per module instead of one fat plugin:
+#   the native Plugins panel switches and configures OWN LOADER ROWS, so a row is
+#   the smallest user-visible on/off unit. Every feature module is therefore its
+#   own npm package with its own host half (and, when it has UI, its own client
+#   half) and is inserted here as one row. Switching one module off leaves the
+#   others mounted, with their own config.
+#
+# Parity rules (checked by the offline static test):
+#   - `name` is the module package name, so the Loader resolves the row (and the
+#     code it mounts) from the profile's node_modules;
+#   - `id` is the `name` the module's host half exports, so the row and the
+#     plugin are recognizably the same thing (a user's block/config override keeps
+#     working across upgrades);
+#   - `@ds-hu/dsh-context-slimmer-core` is deliberately NOT a row: it is the
+#     shared pure library (event protocol, replacement primitive, plan validation,
+#     prompt builder, counters, config schema). It declares neither `dsh.bundle`
+#     nor `dsh.client`, so the panel can never toggle it and no module can
+#     accidentally unmount it.
+#
+# Adding a future module (see docs/CONTEXT.md for the full checklist):
+#   1. create `packages/<name>/` with package.json + lib/index.js exporting
+#      `name`(= row id), `inject`, `apply`, `Config`;
+#   2. add ONE row below, keeping the `- id` / `name` pair adjacent and comments
+#      describing the feature;
+#   3. re-export nothing from the bundle package itself — the bundle is a patch,
+#      not a runtime plugin.
+- insert:
+    # Module I — tool-result slimmer: a background fork subagent drops or trims
+    # stale tool results via a surface `replace`, one compact record row in chat.
+    - id: context-slimmer-tool-result
+      name: '@ds-hu/dsh-context-slimmer-tool-result'

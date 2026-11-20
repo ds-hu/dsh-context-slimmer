@@ -1,0 +1,67 @@
+{
+  "name": "@ds-hu/dsh-context-slimmer-tool-result",
+  "version": "0.1.0",
+  "description": "Tool-result slimmer module of the Context Slimmer bundle: a background fork subagent periodically drops or trims stale tool results for the main agent, while the chat transcript keeps the original tool cards and one extra row reports what was slimmed. Independent Loader row: enable, disable and configure it on its own in the native Plugins panel.",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "icon": "./icon.svg",
+  "dependencies": {
+    "@ds-hu/dsh-context-slimmer-core": "0.1.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ds-hu/dsh-context-slimmer.git",
+    "directory": "packages/tool-result-slimmer"
+  },
+  "bugs": {
+    "url": "https://github.com/ds-hu/dsh-context-slimmer/issues"
+  },
+  "homepage": "https://github.com/ds-hu/dsh-context-slimmer#readme",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "context-engineering",
+    "context-compression",
+    "tool-result"
+  ],
+  "license": "MIT",
+  "files": [
+    "lib",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
