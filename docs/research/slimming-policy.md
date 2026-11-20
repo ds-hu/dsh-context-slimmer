@@ -1,7 +1,7 @@
 # 工具结果精简策略（可直接嵌入插件 system prompt）
 
 - **文档**：`docs/research/slimming-policy.md`
-- **版本**：v1（2026-11-20）
+- **版本**：v1（2026-11-20）；v2 策略依据见 §10（2026-11-20，v0.2.0 / issue #2）
 - **配套**：`docs/research/context-irrelevance-2026.md`（证据与数字）
 - **用法**：第 1–7 节可直接作为后台精简模型的 system prompt（占位符由插件注入）；第 8 节给 QA 做自动化断言；第 9 节是主 Agent 兼容约定。
 - **引用编号**：文中 `[Rn]` 对应 `context-irrelevance-2026.md` 第 14 节参考文献。
@@ -115,3 +115,63 @@ LIMITS      = {max_replacement_tokens, max_batch_shrink_ratio, min_confidence}
 - 替换文本本身必须**诚实标注"已省略、可重取"**——这是"无感知"的正确边界：模型不需要知道谁删的，但必须知道内容被省略，否则会产生无根据的自信 [R13]。
 - 保留审计侧车（原文 + 哈希 + session 事件 id），供回滚与 A/B；不写入主上下文。
 - 触发：批量、低频、压力感知；与 compaction 错开；标记 expected rebuild，监控 `prompt_cache_hit_tokens` [R27][R34][R29]。
+
+
+---
+
+## 10. v2：conservative 默认策略的证据依据与偏差建议（2026-11-20，v0.2.0 / issue #2）
+
+> 本节回答 issue #2「策略过激进」：为什么默认改为 `conservative`（仅允许 `drop` 重复/被覆盖/空输出，禁止 `trim`）有文献依据、benchmark 应如何证明它不降质量，以及 `docs/plan-v0.2.md` §3 的 conservative 范围/阈值是否需调整。
+> **证据边界**：报告中的论文没有直接测"本插件/本场景"；下文凡标注 **[推断]** 的句子，是由既有结论外推到插件设计，不是论文原话。引用编号对应 `context-irrelevance-2026.md` §14；URL 均取自该节。
+
+### 10.1 一句话结论
+
+**把"只能删除有逐字副本或已被新结果覆盖的整条结果"设为默认，是当前证据下唯一能"不依赖语义判断就证明无损"的精简策略；`trim`（部分改写）属于有损记忆，只能作为显式 opt-in（balanced/aggressive），并用 benchmark 证明 non-inferiority。**
+
+### 10.2 三类 conservative 操作的证据
+
+| 操作 | 可证明的安全性 | 依据 | 备注 |
+| :-- | :-- | :-- | :-- |
+| `drop duplicate`（逐字重复，保留后出现者） | **无损去重**：所有事实仍在保留副本中；不需要模型判断"哪部分重要" | 冗余/中性内容主要浪费成本而非提供证据 [R3] https://arxiv.org/abs/2611.04169；Agent 上下文约 84% 是环境观测 [R18] https://arxiv.org/abs/2508.21433 | **[推断]** 这是插件中唯一可用"副本存在"机械证明的删除；风险≈0 |
+| `drop superseded`（同对象的新结果已覆盖旧结果） | 旧值不再被执行状态需要；保留新结果即可 | 竞争性旧值/旧版本是主要伤害源 [R3][R4] https://arxiv.org/abs/2605.10828；会话惯性会模仿旧观测 [R5] https://arxiv.org/abs/2602.03664；lossy memory 保留错误结论比空记忆更糟 [R13] https://arxiv.org/abs/2606.25449；只保留最近 5 组工具调用仍有 71%→79% 完成率 [R11] https://arxiv.org/abs/2606.10209 | **[推断]** 前提是"新结果在保留集合且 stub 指向它"；否则会诱发重读 |
+| `drop empty`（如 `(no output)`） | 无信息量，保留 stub 说明 empty 即可 | 空/干净占位优于模糊摘要 [R8] https://arxiv.org/abs/2608.16370 | **[推断]** 需与"失败但无输出"区分：`exit != 0` 不得当 empty |
+| **不删**：唯一长文本 read、失败证据 | 不可恢复信息，删后只能重读/重试 | 失败证据：Keep the Wrong Stuff In [R31] https://manus.im/blog/Context-Engineering-for-AI-Agents-Lessons-from-Building-Manus；source-first [R13]；提前放弃/不确定是长任务主要失败形态 [R7] https://arxiv.org/abs/2606.29718；**[推断]** 删唯一长读会把可见 token 省成隐藏的 re-read/tool 调用成本 | 见下 10.3 |
+
+### 10.3 为什么默认不能是 balanced/aggressive（trim 的有损性）
+
+1. **部分改写产生"看起来完整、实际缺证据"的记忆**：lossy memory 让模型自信地重复陈旧/错误结论，比空记忆更难纠正 [R13]；把保留内容换成"语义无关内容"会让检索调用再增 **57%**（p<.001）[R8]。
+2. **trim 的收益/风险比很差**：hard distractor 的伤害是"第一滴墨"式非线性，主要损失集中在前 10%，**过滤的收益主要来自缩短长度而非去掉干扰，部分修剪收益很小**；要么整类清掉，要么别指望部分修剪有大收益 [R4]。而整条 `drop`（带可重取 stub）在语义上等价于"观察遮蔽"，文献显示观察遮蔽与 LLM 摘要效果相当甚至略好 [R18] → **默认应选"整条删除 + 诚实占位"，而不是"改写摘要"**。
+3. **压缩器系统性丢侧约束**：6 类压缩器平均只保留 **17%** 的用户侧约束 [R16] https://arxiv.org/abs/2608.11242；默认策略必须把"不可恢复损失概率"压到最低，故保守到只做可证明安全的删除。
+4. **隐藏交互成本**：压缩后检索调用 21.0→**63.9** 次（p=.002），任务完成率指标看不出来 [R8]；删唯一长读后模型重读，正是该机制。[推断] conservative 的 drop 有保留副本，正常情况零重读；这是它与 trim 的本质差别。
+5. **缓存经济学**：前缀任意变化全量重算、cache hit/miss 价差约 50× [R27] https://code.claude.com/docs/en/prompt-caching、[R34] https://api-docs.deepseek.com/guides/kv_cache、[R35] https://api-docs.deepseek.com/quick_start/pricing → 低频、批量、drop-only 更容易摊销一次 rebuild；[推断] 默认保守也更符合缓存成本。
+6. **反例边界（不能拿来说"随便删都行"）**：Squeez 在删 92% 输入 token 时仍有 0.86 recall [R6] https://arxiv.org/abs/2604.04979、只保留最近 5 组工具调用可提升完成率 [R11]，但这些都依赖任务条件化/监督或"旧状态已被新观测覆盖"；**[推断]** 不能外推为"通用默认可以 trim 唯一内容"。
+
+### 10.4 与 `docs/plan-v0.2.md` §3 conservative 范围的偏差（需 Lead 决策）
+
+| ID | 偏差/风险 | 证据/推理 | 建议 |
+| :-- | :-- | :-- | :-- |
+| **C-1（critical）** | "单批最多 drop **20% 的目标 char**" 与"整条 drop"语义冲突：删除一条重复 read = 该目标 100% 字符；4 个候选 × 8k 时删 1 条就是 32k 的 25% > 20% → **永远 no-op**，benchmark 的 "conservative token < baseline" 必然失败 | plan §3 + §5；[推断] 由阈值算术直接推出 | 改为**条数/证据约束**：单批 drop ≤ `min(maxTargets, ceil(候选数/2))` 条；每条必须 `evidence.kind ∈ {duplicate,superseded,empty}` 且带保留副本/覆盖结果引用；char 比例只用于 balanced/aggressive 的 trim 预算 |
+| **C-2（important）** | `superseded` 只允许"失败尝试被后续成功覆盖"，漏掉最常见的"同对象旧 read 被新 read/写覆盖"（旧版本 stale） | 旧值/旧版本竞争是首要伤害 [R3][R4]；会话惯性 [R5]；plan 自身也允许 `superseded` 类别 | 定义改为"同一路径/查询/状态存在更新、更新的结果在保留集合"；可细分 `stale-read`；只有失败→成功时才要求成功结果 |
+| **C-3（important）** | conservative 只能 drop **整条**结果；plan §5 场景 4 "一段高重复日志输出（可安全 drop 重复块）" 的**块内**重复无法被 conservative 处理，benchmark 会低估收益/场景与策略不匹配 | plan §3 表格 + §5 场景 4；[推断] 块内去重需要 trim/partial，属 balanced+ | 场景 4 改为"**两次逐字相同的整条日志输出**"（第二次保留、第一次可 drop）；块内重复只作为 aggressive 的演示，不计入 conservative 收益 |
+| **C-4（important）** | conservative drop 后 stub 若写 "repeat the same call" 会诱发重读，违背"零重读"与 [R8] | [推断] 主 Agent 无法区分"删了但可重跑"和"需要重跑" | conservative stub 必须指向保留副本：`duplicate of <callId>; content retained there; no re-fetch needed` / `superseded by <callId> (success at turn T)`；balanced/aggressive 才保留"可重取"语义 |
+| **C-5（medium）** | 阈值/窗口交互：`maxTargets:4` + `protectRecent:3` + `everyNToolCalls:12` + `minChars:24000`；相邻重复对容易同处保护窗口或滑出候选窗口 | plan §3；[推断] 重复对相隔 1–2 次调用时，触发时可能两条都被 `protectRecent` 保护，或旧副本不在"最新 4 条"内 | 内部候选扫描窗口可大于 planner 可见的 `maxTargets`（例如扫描最近 12 条、仍最多交 4 条）；或对 **duplicate 做宿主前置去重**（不需要模型，也不计入模型计划） |
+| **C-6（medium）** | `empty` 判定需排除失败：`exit != 0` 但无文本输出不得当 empty | 失败证据不可丢 [R31][R13] | 校验时 `isError === true` 一律不得 `evidence.kind='empty'` |
+| **C-7（medium）** | `evidence.kind` 可选（plan §3 第 45 行"可选 `evidence.kind`"），conservative 无法审计 | 需要"保留副本/覆盖结果"引用才能机械验证 | conservative 下 `evidence.kind` 与 `duplicateOf`/`replaces` **必填**；其余策略可可选 |
+
+### 10.5 与 benchmark 的关系（结论）
+
+- conservative 的安全性论据是"删除有副本/被覆盖内容"，因此 **benchmark 必须验证两件事**：① baseline 与 conservative 都 5/5 通过（不降质量）；② conservative 实际发生了 ≥1 次合法 drop 且模型可见工具文本下降（策略真的生效，而不是阈值卡成 no-op）。
+- 具体场景/校验点/指标/随机性控制见 `docs/research/benchmark-design.md`；其中 C-1 阈值若不修，benchmark 会在"保守模式零替换"处失败——这是**阈值 bug，不是策略失败**。
+- benchmark 还必须覆盖**规划器截断/超预算**（v0.1.0 生产回归：约 20 次里大多整批失败）这一独立退化类型，见下文 §10.6 与 `benchmark-design.md` §4.1/§7 D8。
+
+### 10.6 规划器截断/超预算（v0.1.0 生产回归）
+
+- **事实（生产回归）**：v0.1.0 的规划子 Agent 在长会话中思考过长、触达输出 token 上限，**整批计划失败**（约 20 次里大多失败，不是偶发抖动）。其失败形态是"整批失败 → 无精简/无效操作"，比"错误删除"更隐蔽，因为主上下文看起来完全正常。
+- **设计含义**：conservative 的"安全"以"规划器能在预算内产出合法计划"为前提；**[推断]** 因此 v0.2.0 的直调 LLM + `reasoningEffort: off` + planner `maxOutputTokens: 4096` + 极简 JSON prompt 是策略可靠性的必要条件，而不是纯性能优化。
+- **验证要求**：benchmark 必须单独观测 `finishReason ∈ {length,max_tokens}` 截断次数、失败整批次数与 planner prompt/completion tokens；**conservative 截断=0 且至少发生一次精简**才算通过（不对 aggressive 断言不截断）；若截断仍发生，插件应降级为整体 no-op（上下文不变）并告警，禁止部分应用计划。
+- 详见 `docs/research/benchmark-design.md` §4.1/§7 D8。
+
+### 10.7 引用与不确定性
+
+- 引用 URL：[R3] https://arxiv.org/abs/2611.04169 ；[R4] https://arxiv.org/abs/2605.10828 ；[R5] https://arxiv.org/abs/2602.03664 ；[R6] https://arxiv.org/abs/2604.04979 ；[R7] https://arxiv.org/abs/2606.29718 ；[R8] https://arxiv.org/abs/2608.16370 ；[R11] https://arxiv.org/abs/2606.10209 ；[R13] https://arxiv.org/abs/2606.25449 ；[R16] https://arxiv.org/abs/2608.11242 ；[R18] https://arxiv.org/abs/2508.21433 ；[R27] https://code.claude.com/docs/en/prompt-caching ；[R31] https://manus.im/blog/Context-Engineering-for-AI-Agents-Lessons-from-Building-Manus ；[R34] https://api-docs.deepseek.com/guides/kv_cache ；[R35] https://api-docs.deepseek.com/quick_start/pricing 。
+- 不确定性：以上均为 2026 文献/厂商文档的**外推**（[推断]），未经本插件 A/B 实测；benchmark 结果出来前，不应把 conservative 当作"已被证明不降质量"（只能称"设计上风险最小"）。

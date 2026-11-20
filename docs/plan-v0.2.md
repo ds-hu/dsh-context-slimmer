@@ -135,3 +135,10 @@
 3. 截断容错：若 planner 调用以 `max-tokens`/`length` 结束，且本次显式设置了 maxTokens，则**自动重试一次不带 maxTokens（inherit）**；仍截断才 diagnostics 记 `planner-truncated` + no-op。
 4. diagnostics 记录 planner `finishReason`、usage、duration、是否重试；verify/benchmark 断言 conservative 无 `planner-truncated`。
 5. 生产 profile 的 row 保持 disabled，0.2.0 装好并验证后重新启用。
+
+## 11. api-scout 取证后的实现约束（P1-P3）
+
+- **P1（硬约束）**：Config 里每个要进面板的字段（含嵌套 `model.*`）必须 `.volatile()`；否则 settings form 不显示、`mutate` 抛 `"Config field ... is not volatile"`（`dsh-settings:122-131,415-417,506`）。官方用法 `dsh-web-search-deepseek/lib/index.js:278-284`。
+- **P2**：row 详情页 `plugins.row.config` 的 `summary` 仅在 row 无 description 时渲染（`client-ui-plugin-manager:5855`）；我们已有 locale description，故验收以 `view:'page'` 表单为准，summary 仅尽力而为。
+- **P3**：`ctx.llm.stream()` 的 `purpose` 省略（非 core 枚举）；输出按 text/tool-call 收集，忽略非 structured_output 的 tool-call（绝不执行）；`finish.kind ∈ {stop,tool-calls}` 才视为成功；`max-tokens/error/aborted` 失败（max-tokens 按 §10 先重试不带 maxTokens）。
+- 前端可用 require：`react`、`react/jsx-runtime`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-ui-primitives`；本项目继续手写 `React.createElement`，不引入构建步骤。
