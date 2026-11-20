@@ -1,6 +1,6 @@
 {
   "enabled": true,
-  "everyNToolCalls": 2,
+  "everyNToolCalls": 3,
   "minChars": 0,
   "protectRecent": 1,
   "maxTargets": 6,
@@ -8,5 +8,7 @@
   "timeoutMs": 180000,
   "forkProvider": "fork",
   "promptLocale": "zh",
-  "model": { "provider": "inherit" }
+  "model": {
+    "provider": "inherit"
+  }
 }

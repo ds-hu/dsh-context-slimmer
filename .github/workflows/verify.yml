@@ -39,10 +39,10 @@ on:
         type: string
         default: '24'
       slimmer_config:
-        description: JSON config applied to the plugin row in the temporary profile
+        description: JSON config applied to the plugin row (empty = scripts/ci/slimmer-config.default.json)
         required: false
         type: string
-        default: '{"enabled":true,"everyNToolCalls":2,"minChars":0,"protectRecent":1,"maxTargets":6,"minTargetChars":0,"timeoutMs":180000,"forkProvider":"fork","promptLocale":"zh","model":{"provider":"inherit"}}'
+        default: ''
       include_web_search:
         description: Add one web_search step to the scenario (toggles a full model turn)
         required: false

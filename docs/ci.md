@@ -75,7 +75,10 @@ check it runs is offline.
 4. `prepare-profile.sh --profile ci-headless --template headless --probe-model`
    (creates the profile, links the workspace packages, probes `/models`)
 5. `prepare-profile.sh --profile ci-web --template web --no-probe-model`
-6. `run-scenario.sh` — one real headless session
+6. `run-scenario.sh` — one real headless session (read large fixture → failing
+   `bash false` → optional `web_search` → `bash sleep 25`) so the plugin's
+   asynchronous fork batch has a deterministic window to land before the
+   one-shot session exits
 7. `assert-slimming.mjs` — **hard gate**; a failure fails the job
 8. `dsh web` (localhost, tokenized URL parsed from its log) +
    `screenshot.mjs` — UI text assertions are non-fatal (see §5)
@@ -101,7 +104,7 @@ defaults overridden so a 3-tool-call scenario triggers exactly one batch:
 ```json
 {
   "enabled": true,
-  "everyNToolCalls": 2,
+  "everyNToolCalls": 3,
   "minChars": 0,
   "protectRecent": 1,
   "maxTargets": 6,
@@ -113,10 +116,13 @@ defaults overridden so a 3-tool-call scenario triggers exactly one batch:
 }
 ```
 
-`minChars: 0` disables the size trigger, so `everyNToolCalls: 2` is the only
-trigger; `protectRecent: 1` keeps the step the agent is working on safe;
-`minTargetChars: 0` lets even the small failing-command result be treated as a
-target (extra evidence, no extra cost).
+`minChars: 0` disables the size trigger, so `everyNToolCalls: 3` is the only
+trigger; the scenario produces exactly four tool results (read fixture, failed
+bash, web_search, `sleep 25`), so exactly one batch triggers at the third result
+and the fourth step keeps the process alive long enough for the plugin's
+asynchronous fork batch to land. `protectRecent: 1` keeps the newest result
+safe; `minTargetChars: 0` lets even the small failing-command result be treated
+as a target (extra evidence, no extra cost).
 
 ---
 
@@ -411,7 +417,15 @@ plugin bugs:
    the transcript. Built-in compaction summaries cite log-only events
    (`compaction/start`, `compaction/summary`), which is why plugin replacements
    are scoped to `tool/result` surface events.
-7. **Headless sessions are not auto-registered in the Web GUI.** `run-scenario.sh`
+7. **One-shot sessions can exit before the plugin's async batch lands.** The
+   plugin schedules its fork batch asynchronously after the trigger; a headless
+   one-shot run may finish its final step and exit first, so the same CI config
+   produced a batch in one run and no `contextSlimmer` events in the next. Fix:
+   the scenario now includes a `sleep 25` bash step *after* the trigger point
+   (threshold `everyNToolCalls: 3` fires on the third result, the sleep is the
+   fourth), giving the fork child a deterministic window; the assert failure
+   message makes this obvious (`slimmer-prune-record: 0 ...`).
+8. **Headless sessions are not auto-registered in the Web GUI.** `run-scenario.sh`
    seeds `$DSH_HOME/storages/workspace.json` with the workspace path + session id
    so `screenshot.mjs` can click the sidebar row (there is no deep link).
 

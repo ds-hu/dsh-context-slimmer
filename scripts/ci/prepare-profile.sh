@@ -47,7 +47,7 @@ ALLOW_UNLISTED_MODEL="${ALLOW_UNLISTED_MODEL:-0}"
 # brace-containing default even when the variable is set, corrupting the JSON.
 SLIMMER_CONFIG_JSON="${SLIMMER_CONFIG_JSON-}"
 if [[ -z "$SLIMMER_CONFIG_JSON" ]]; then
-  SLIMMER_CONFIG_JSON='{"enabled":true,"everyNToolCalls":2,"minChars":0,"protectRecent":1,"maxTargets":6,"minTargetChars":0,"timeoutMs":180000,"forkProvider":"fork","promptLocale":"zh","model":{"provider":"inherit"}}'
+  SLIMMER_CONFIG_JSON='{"enabled":true,"everyNToolCalls":3,"minChars":0,"protectRecent":1,"maxTargets":6,"minTargetChars":0,"timeoutMs":180000,"forkProvider":"fork","promptLocale":"zh","model":{"provider":"inherit"}}'
 fi
 SLIMMER_ENTRY_IDS="${SLIMMER_ENTRY_IDS:-}"
 SLIMMER_ENTRY_ID_REGEX="${SLIMMER_ENTRY_ID_REGEX:-}"

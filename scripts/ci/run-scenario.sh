@@ -101,16 +101,21 @@ log "session timeout: ${SCENARIO_TIMEOUT_SECONDS}s"
 
 build_prompt() {
   if [[ -n "$PROMPT" ]]; then return 0; fi
-  local web_step=""
+  local step=3 web_step="" wait_step=""
   if [[ "$INCLUDE_WEB_SEARCH" == "1" ]]; then
-    web_step=$'3. Use the web_search tool exactly once with the query "DeepSeek V4.1 Flash".\n'
+    web_step="${step}. Use the web_search tool exactly once with the query \"DeepSeek V4.1 Flash\"."
+    step=$((step + 1))
   fi
+  wait_step="${step}. Use the bash tool to run exactly this command once: \`sleep 25\`. Do not pass any other command and do not retry it. This wait keeps the session alive while the plugin's background batch lands."
   PROMPT="$(cat <<EOF
 You are running a fixed CI verification scenario. Complete these steps exactly, in order, then stop.
 
 1. Use the read tool to read the file ".ci-fixture-large.txt" in the current working directory. It is a test fixture; read it once.
 2. Use the bash tool to run the command \`false\` exactly once. That command is expected to fail; do not retry it.
-${web_step}After the tool results above are available, reply with exactly this text and nothing else: CI_SCENARIO_DONE
+${web_step}
+${wait_step}
+
+The bash tool is used exactly twice (steps 2 and ${step}). After all tool results above are available, reply with exactly this text and nothing else: CI_SCENARIO_DONE
 
 Do not use any other tools. Do not read other files. Do not explore the repository. Do not retry failing commands.
 EOF
