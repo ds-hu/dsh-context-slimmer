@@ -121,28 +121,51 @@ async function loadPlaywright() {
   return undefined;
 }
 
+// Notice/dialog buttons the Web UI can show on first launch (preview notice,
+// sign-in, update banner). The preview notice in particular can be rendered
+// *after* the first dismissal round, so this helper is also called while the
+// script waits for the session to render.
+const DISMISS_BUTTON_TEXT = /^(Continue|继续|Got it|知道了|Okay|好|Ok|Later|稍后|Close|关闭|Dismiss|跳过|Skip|开始使用|我已知晓|同意|Agree)$/i;
+
+/**
+ * Click every visible notice/dialog button once. Returns how many were clicked.
+ * A present modal mask intercepts clicks, so fall back to Escape + force click.
+ *
+ * @param {import('playwright').Page} page Browser page.
+ * @returns {Promise<number>} Number of dismissed buttons.
+ */
+async function dismissOverlaysOnce(page) {
+  let clicked = 0;
+  const buttons = page.getByRole('button').filter({ hasText: DISMISS_BUTTON_TEXT });
+  const count = await buttons.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    const button = buttons.nth(index);
+    if (!(await button.isVisible().catch(() => false))) continue;
+    try {
+      await button.click({ timeout: 1500 });
+    } catch {
+      await page.keyboard.press('Escape').catch(() => {});
+      await button.click({ timeout: 1500, force: true }).catch(() => {});
+    }
+    clicked += 1;
+    await page.waitForTimeout(250);
+  }
+  if (clicked === 0 && (await page.locator('[role="dialog"]:visible').count().catch(() => 0)) > 0) {
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(200);
+    clicked = (await page.locator('[role="dialog"]:visible').count().catch(() => 0)) === 0 ? 1 : 0;
+  }
+  return clicked;
+}
+
 async function dismissNotices(page, timeoutMs = 12000) {
-  const dismissText = /^(Continue|继续|Got it|知道了|Okay|好|Ok|Later|稍后|Close|关闭|Dismiss|跳过|Skip)$/i;
   const deadline = Date.now() + timeoutMs;
   let dismissed = 0;
   while (Date.now() < deadline) {
-    const buttons = page.getByRole('button').filter({ hasText: dismissText });
-    const count = await buttons.count().catch(() => 0);
-    let clicked = false;
-    for (let index = 0; index < count; index += 1) {
-      const button = buttons.nth(index);
-      if (await button.isVisible().catch(() => false)) {
-        await button.click({ timeout: 2000 }).catch(() => {});
-        dismissed += 1;
-        clicked = true;
-        await page.waitForTimeout(300);
-        break;
-      }
-    }
-    if (!clicked) {
-      const hasDialog = await page.locator('[role="dialog"]:visible').count().catch(() => 0);
-      if (hasDialog === 0 && dismissed > 0) break;
-      if (hasDialog === 0) break;
+    const before = dismissed;
+    dismissed += await dismissOverlaysOnce(page);
+    if (dismissed === before) {
+      if ((await page.locator('[role="dialog"]:visible').count().catch(() => 0)) === 0) break;
       await page.waitForTimeout(250);
     }
   }
@@ -240,7 +263,12 @@ async function main() {
 
   const session = await openScenarioSession(page, args.sessionId, args.artifactsDir);
   report.session = session;
-  await page.waitForTimeout(1800);
+  await page.waitForTimeout(600);
+  // Opening the first session can trigger the preview notice; clear it again so
+  // the conversation panel is not covered by the modal mask.
+  const lateDismissed = await dismissNotices(page, 6000);
+  if (lateDismissed > 0) log(`dismissed ${lateDismissed} late notice(s)/dialog button(s) after opening the session`);
+  await page.waitForTimeout(1200);
 
   // The conversation panel loads persisted events; give it a moment to render.
   await page.waitForFunction(() => (document.body?.innerText ?? '').length > 400, undefined, { timeout: 30000 }).catch(() => {
@@ -248,18 +276,23 @@ async function main() {
   });
 
   let uiTextFound = false;
-  try {
-    const started = Date.now();
-    await page.waitForFunction(
-      (text) => (document.body?.innerText ?? '').includes(text),
-      args.uiText,
-      { timeout: args.uiTextTimeoutMs },
-    );
-    uiTextFound = true;
-    report.uiTextWaitMs = Date.now() - started;
-  } catch {
-    uiTextFound = false;
+  const started = Date.now();
+  let lastDismissAttempt = 0;
+  while (Date.now() - started < args.uiTextTimeoutMs) {
+    const bodyText = await page.locator('body').innerText().catch(() => '');
+    if (bodyText.includes(args.uiText)) {
+      uiTextFound = true;
+      break;
+    }
+    // A late preview/sign-in overlay blocks rendering below it; keep clearing it.
+    if (Date.now() - lastDismissAttempt > 1500) {
+      lastDismissAttempt = Date.now();
+      const cleared = await dismissOverlaysOnce(page);
+      if (cleared > 0) log(`cleared ${cleared} overlay(s) while waiting for the UI row text`);
+    }
+    await page.waitForTimeout(500);
   }
+  if (uiTextFound) report.uiTextWaitMs = Date.now() - started;
   report.ui_assert_status = uiTextFound ? 'found' : 'skipped-timeout';
   if (!uiTextFound) {
     warn(`UI text "${args.uiText}" not found within ${args.uiTextTimeoutMs}ms; capturing screenshots anyway and marking ui_assert_status=skipped-timeout (non-fatal)`);
@@ -284,6 +317,7 @@ async function main() {
 
   if (args.pluginsPanel) {
     try {
+      await dismissOverlaysOnce(page);
       const pluginsButton = page.getByRole('button', { name: /Plugins|插件/i }).first();
       const visible = await pluginsButton.waitFor({ state: 'visible', timeout: 10000 }).then(() => true).catch(() => false);
       if (visible) {

@@ -62,6 +62,15 @@ const FALLBACK_CHARS_PER_TOKEN = 4
 const MAX_TASK_CHARS = 1600
 
 /**
+ * Subagent stop reasons that always fail the batch, even when a plan can be
+ * parsed: an aborted/max-tokens/refusal child must never mutate the parent
+ * surface. (A plain `'error'` is NOT in this set: with `outputSchema` requested,
+ * the manager rewrites a completed-but-unstructured run to `'error'`, which is a
+ * normal text-plan degradation path — see lib/subagent captureLocalResult.)
+ */
+const TERMINAL_FAILURE_STOP_REASONS = new Set(['aborted', 'max-tokens', 'refusal'])
+
+/**
  * Estimate the token price of one message without importing dsh packages.
  *
  * @param {object | undefined} tokenMeter Optional `ctx.tokenMeter` service.
@@ -527,24 +536,42 @@ export class SlimmerHost {
       (total, block) => total + (block?.type === 'text' && typeof block.text === 'string' ? Array.from(block.text).length : 0),
       0,
     )
+    const stopReason = String(result?.stopReason ?? 'unknown')
+    const structuredPresent = result?.structured !== undefined
     this.diag(
       'result',
       {
-        stopReason: result?.stopReason ?? 'unknown',
-        structuredType: result?.structured === undefined ? 'undefined' : typeof result.structured,
+        stopReason,
+        structuredPresent,
+        structuredType: structuredPresent ? typeof result.structured : 'undefined',
         outputBlockCount: outputBlocks.length,
         textRawLength: outputTextLength,
+        ...(typeof result?.diagnostic === 'string' && result.diagnostic.length > 0
+          ? { diagnostic: bounded(result.diagnostic, 200) }
+          : {}),
       },
       session.id,
     )
-    if (result?.stopReason !== undefined && result.stopReason !== 'completed') {
-      this.ctx.logger?.warn?.(`context-slimmer: subagent stopped with ${String(result.stopReason)}`)
-      return STATUS_FAILED
-    }
+    // Managed fork + outputSchema contract: when the child finishes WITHOUT
+    // calling structured_output, captureLocalResult rewrites stopReason
+    // 'completed' -> 'error' and omits `structured`; the plan can still be in
+    // the final assistant text (`output`). Success is therefore decided by
+    // "can a plan be extracted", NOT by stopReason alone. Only the genuine
+    // terminal reasons (aborted/max-tokens/refusal) always fail.
     const plan = extractPlan(result)
     this.diag('plan', { plan: sanitizePlanForLog(plan) }, session.id)
+    if (TERMINAL_FAILURE_STOP_REASONS.has(stopReason)) {
+      this.diag('activation-error', { stage: 'result', reason: `stop:${stopReason}` }, session.id)
+      this.ctx.logger?.warn?.(`context-slimmer: subagent stopped with ${stopReason}`)
+      return STATUS_FAILED
+    }
     if (plan === null) {
-      const reason = result?.structured === undefined ? 'no-text-plan' : 'no-structure'
+      if (stopReason === 'error') {
+        this.diag('activation-error', { stage: 'result', reason: 'no-plan:error' }, session.id)
+        this.ctx.logger?.warn?.('context-slimmer: subagent returned an error and no extractable plan')
+        return STATUS_FAILED
+      }
+      const reason = structuredPresent ? 'no-structure' : 'text-plan-parse-failed'
       this.diag('no-op', { reason }, session.id)
       this.ctx.logger?.debug?.('context-slimmer: subagent returned no plan; treating as no-op')
       return STATUS_NO_OP

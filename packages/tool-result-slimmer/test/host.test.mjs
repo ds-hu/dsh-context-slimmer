@@ -210,6 +210,52 @@ test('no-op / rejected / failed plans never touch the surface', async () => {
   }
 })
 
+test('text plan is accepted when outputSchema was not submitted (stopReason rewritten to error)', async () => {
+  const ctx = createFakeCtx()
+  const session = createFakeSession()
+  // Managed fork + outputSchema: a child that answers in plain assistant text
+  // (never calls structured_output) is reported as stopReason 'error' with no
+  // `structured` field, but `output` still carries the final text plan.
+  ctx.nextResult = {
+    stopReason: 'error',
+    output: [
+      { type: 'text', text: 'Here is the plan:' },
+      { type: 'text', text: '```json\n{"summary":"清理","items":[{"index":1,"op":"trim","text":"[elided by context-slimmer] read_file; original 2000 chars; re-run to restore","reason":"bulk"},{"index":0,"op":"drop","reason":"无关"}]}\n```' },
+    ],
+    diagnostic: 'output schema not satisfied',
+  }
+  const host = new SlimmerHost(ctx, config)
+  host.install()
+  await preStep(ctx, session)
+  appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
+  appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
+  const before = session.events.length
+  await preStep(ctx, session)
+  assert.equal(session.events.length, before + 4, 'text-plan degradation must still land prune->replace pairs')
+  assert.deepEqual(session.events.slice(before).map((event) => event.type), ['compaction/prune', 'tool/result', 'compaction/prune', 'tool/result'])
+  assert.equal(readSlimMetaFromEvent(session.events[before + 2]).role, 'summary')
+})
+
+test('aborted/max-tokens/refusal never mutate the surface even with a plan', async () => {
+  for (const stopReason of ['aborted', 'max-tokens', 'refusal']) {
+    const ctx = createFakeCtx()
+    const session = createFakeSession()
+    ctx.nextResult = {
+      stopReason,
+      output: [],
+      structured: { summary: 's', items: [{ index: 0, op: 'drop' }] },
+    }
+    const host = new SlimmerHost(ctx, config)
+    host.install()
+    await preStep(ctx, session)
+    appendObserved(ctx, session, 'call-1', 'bash', 'a'.repeat(1000))
+    appendObserved(ctx, session, 'call-2', 'read_file', 'b'.repeat(2000))
+    const before = session.events.length
+    await preStep(ctx, session)
+    assert.equal(session.events.length, before, `${stopReason} must not append events`)
+  }
+})
+
 test('structured output wins; assistant JSON text is the fallback', () => {
   assert.deepEqual(extractPlan({ structured: { summary: 's', items: [] }, output: [] }), { summary: 's', items: [] })
   const fromText = extractPlan({
@@ -366,7 +412,7 @@ test('diagnosticsFile records no-op/failure reasons; disabled config writes noth
     await preStep(ctx, session)
     const records = fs.readFileSync(diagnosticsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
     const noop = records.find((record) => record.kind === 'no-op')
-    assert.equal(noop.reason, 'no-text-plan')
+    assert.equal(noop.reason, 'text-plan-parse-failed')
     assert.equal(records.some((record) => record.kind === 'apply'), false)
 
     // A plan that validatePlan rejects is recorded with its stable code.

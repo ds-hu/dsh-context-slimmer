@@ -122,3 +122,22 @@
 - 路径由用户/CI 提供，需运行进程可写；不自动建目录、不轮转（CI 每次 fresh 目录，本地按需自行清理）。
 - CI：`scripts/ci/slimmer-config.default.json` 设置为 `/tmp/ci-artifacts/slimmer-diagnostics.jsonl`，verify.yml 的 artifact 已覆盖该目录；失败时直接 grep `"kind":"validate"` / `"kind":"no-op"` 定位根因。
 - 实现：`packages/core/lib/config.js`（字段/校验）、`packages/tool-result-slimmer/lib/index.js` 的 `SlimmerHost.diag()` 与 `sanitizePlanForLog()`；测试 `host.test.mjs` 覆盖“成功/失败路径均有合法 JSONL”“未配置不创建文件”。
+
+---
+
+## DEV-11 子 Agent 未提交 outputSchema 时 stopReason 被改写为 `'error'`：成功与否按“计划能否提取”判定
+
+**机制（源码证据）**：managed fork activation 带 `outputSchema` 时，若子 Agent 结束前**没有调用 `structured_output`**（例如把合法 JSON 计划直接写在最终 assistant 文本里），`dsh-subagent` 的 `captureLocalResult` 会把 `stopReason` 从 `'completed'` **改写为字符串 `'error'`**，且结果对象**不含 `structured` 字段**；`output` 仍保留最终 assistant 的 `ContentBlock[]`（含文本计划）。证据：`dsh-subagent/lib/index.js:1104-1127`、`dsh-subagent/lib/types/activation.js:74-88`、`dsh-subagent/lib/types/types.d.ts:237-262`。
+
+**此前的错误**：host 先判 `stopReason !== 'completed'` → 直接返回 `failed`，**没有走到文本兜底**，导致两轮 CI 中“子 Agent 返回合法文本计划却被静默 no-op”。
+
+**决策**：批次成败由「能否提取出计划」决定，而不是单独由 `stopReason` 决定。顺序：
+1. `stopReason ∈ {aborted, max-tokens, refusal}` → 永远失败（即使带 `structured` 也不得改写父 surface）；
+2. 先 `extractPlan(result)`（`structured` 优先；否则把 **所有** text blocks 拼接后提取 ```json 代码块/首个平衡 JSON 对象）；
+3. `plan !== null` → 无论 `stopReason` 是 `completed` 还是被改写的 `error`，继续 `validatePlan` → `applyPlan`（这是正常的结构化输出降级路径，不算子 Agent 故障）；
+4. `plan === null` 且 `stopReason === 'error'` → `failed`（诊断 reason `no-plan:error`）；
+5. `plan === null` 且 `stopReason === 'completed'` → `no-op`（reason `text-plan-parse-failed`；若 `structured` 存在但不可用则 `no-structure`）。
+
+**诊断补充（DEV-10 字段）**：`result` 事件记录 `stopReason`（字符串）、`structuredPresent`、`structuredType`、`outputBlockCount`、`textRawLength`，以及 `result.diagnostic` 非空时的前 200 字符（不参与解析）；`no-op`/`activation-error` 的 reason 使用固定枚举：`text-plan-parse-failed`、`no-structure`、`empty-items`、`no-plan:<stopReason>`、`stop:<stopReason>`。
+
+**测试**：`host.test.mjs` 新增「`stopReason:'error'` + `structured` 缺失 + output 文本计划 → 必须落 prune→replace 且末条 summary」正例；新增「`aborted`/`max-tokens`/`refusal` + 有 `structured` 也不落地」负例；原「stopReason error 且无 plan → failed」用例语义保留。
